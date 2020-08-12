@@ -1,7 +1,7 @@
 // Copyright (c) YugaByte, Inc.
 
 import React, { Component } from 'react';
-import { isEmptyArray } from 'utils/ObjectUtils';
+import { isEmptyArray } from '../../utils/ObjectUtils';
 import './stylesheets/RegionMapLegend.scss';
 import SelectList from 'react-widgets/lib/SelectList';
 import _ from 'lodash';
@@ -12,9 +12,9 @@ export default class RegionMapLegend extends Component{
     this.state = {selectedProviderList: props.providers};
   }
 
-  componentWillUpdate(nextProps, nextState) {
-    if (!_.isEqual(this.state.selectedProviderList, nextState.selectedProviderList)) {
-      this.props.onProviderSelect(nextState.selectedProviderList);
+  componentDidUpdate(prevProps, prevState) {
+    if (!_.isEqual(prevState.selectedProviderList, this.state.selectedProviderList)) {
+      prevProps.onProviderSelect(this.state.selectedProviderList);
     }
   }
   render() {

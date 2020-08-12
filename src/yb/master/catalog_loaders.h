@@ -46,16 +46,17 @@ namespace master {
       public Visitor<BOOST_PP_CAT(BOOST_PP_CAT(Persistent, name), Info)> { \
   public: \
     explicit BOOST_PP_CAT(name, Loader)( \
-        CatalogManager* catalog_manager) \
-        : catalog_manager_(catalog_manager) {} \
-    \
-  protected: \
-    CHECKED_STATUS Visit( \
-        const key_type& key, \
-        const entry_pb_name& metadata) override; \
+        CatalogManager* catalog_manager, int64_t term = OpId::kUnknownTerm) \
+        : catalog_manager_(catalog_manager), term_(term) {} \
     \
   private: \
+    CHECKED_STATUS Visit( \
+        const key_type& key, \
+        const entry_pb_name& metadata) override REQUIRES(catalog_manager_->lock_); \
+    \
     CatalogManager *catalog_manager_; \
+    \
+    int64_t term_; \
     \
     DISALLOW_COPY_AND_ASSIGN(BOOST_PP_CAT(name, Loader)); \
   };

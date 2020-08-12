@@ -21,16 +21,16 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.yb.pgsql.cleaners.ClusterCleaner;
 import org.yb.pgsql.cleaners.RoleCleaner;
-import org.yb.pgsql.cleaners.TabletServerCleaner;
 import org.yb.util.YBTestRunnerNonTsanOnly;
 
+import java.io.File;
+import java.nio.file.Files;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-import java.util.TreeMap;
 
 import static org.yb.AssertionWrappers.assertThat;
 import static org.yb.AssertionWrappers.fail;
@@ -42,22 +42,6 @@ import static org.yb.pgsql.ComparableArray.arrayOf;
 @RunWith(value = YBTestRunnerNonTsanOnly.class)
 public class TestPgConfiguration extends BasePgSQLTest {
   private static final Logger LOG = LoggerFactory.getLogger(TestPgConfiguration.class);
-
-  private TabletServerCleaner tabletServerCleaner;
-
-  @Override
-  protected TreeMap<Integer, ClusterCleaner> getCleaners() {
-    TreeMap<Integer, ClusterCleaner> cleaners = super.getCleaners();
-    tabletServerCleaner = new TabletServerCleaner();
-    cleaners.put(0, tabletServerCleaner);
-    cleaners.put(1, new RoleCleaner());
-    return cleaners;
-  }
-
-  @Before
-  public void before() {
-    tabletServerCleaner.snapshot(miniCluster);
-  }
 
   @Test
   public void testPostgresConfigDefault() throws Exception {
@@ -427,6 +411,22 @@ public class TestPgConfiguration extends BasePgSQLTest {
   }
 
   @Test
+  public void testLogMinDurationStatement() throws Exception {
+    int tserver = spawnTServerWithFlags("--ysql_log_min_duration_statement=100");
+
+    try (Connection connection = newConnectionBuilder().setTServer(tserver).connect();
+         Statement statement = connection.createStatement()) {
+      assertQuery(statement, "SHOW log_min_duration_statement", new Row("100ms"));
+    }
+
+    tserver = spawnTServerWithFlags("--ysql_log_min_duration_statement=150");
+    try (Connection connection = newConnectionBuilder().setTServer(tserver).connect();
+         Statement statement = connection.createStatement()) {
+      assertQuery(statement, "SHOW log_min_duration_statement", new Row("150ms"));
+    }
+  }
+
+  @Test
   public void mixedPostgresConfiguration() throws Exception {
     int tserver = spawnTServerWithFlags(
         "--ysql_datestyle=MDY",
@@ -452,6 +452,35 @@ public class TestPgConfiguration extends BasePgSQLTest {
 
       // Initdb takes priority over defaults.
       assertQuery(statement, "SHOW lc_messages", new Row("en_US.UTF-8"));
+    }
+  }
+
+  @Test
+  public void flagfileWithRelativePath() throws Exception {
+    // Creating a temporary flagfile as a relative path.
+    File targetDir = new File("target");
+    File confFile = File.createTempFile("tserver", ".conf", targetDir);
+    confFile.deleteOnExit();
+    // Just a flag whose value can be checked through SQL API.
+    Files.write(confFile.toPath(), "--ysql_max_connections=1234".getBytes());
+
+    int tserver = spawnTServerWithFlags(
+        "--flagfile=" + targetDir.getName() + "/" + confFile.getName());
+
+    try (Connection conn = newConnectionBuilder().setTServer(tserver).connect();
+        Statement stmt = conn.createStatement()) {
+
+      // flagfile flags should be applied:
+      assertQuery(stmt, "SHOW max_connections", new Row("1234"));
+
+      // Simple YSQL workflow as an additional sanity check:
+      stmt.execute("CREATE TABLE test_table(a int, b text);");
+      try {
+        stmt.execute("INSERT INTO test_table VALUES (1, 'xyz');");
+        assertQuery(stmt, "SELECT * FROM test_table", new Row(1, "xyz"));
+      } finally {
+        stmt.execute("DROP TABLE test_table;");
+      }
     }
   }
 

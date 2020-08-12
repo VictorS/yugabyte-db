@@ -13,7 +13,11 @@ import { VALIDATE_FROM_TOKEN, VALIDATE_FROM_TOKEN_RESPONSE,
          DELETE_CUSTOMER_CONFIG, DELETE_CUSTOMER_CONFIG_RESPONSE, GET_LOGS, GET_LOGS_SUCCESS,
          GET_LOGS_FAILURE, GET_RELEASES, GET_RELEASES_RESPONSE, REFRESH_RELEASES,
          REFRESH_RELEASES_RESPONSE, IMPORT_RELEASE, IMPORT_RELEASE_RESPONSE, UPDATE_RELEASE,
-         UPDATE_RELEASE_RESPONSE, GET_ALERTS, GET_ALERTS_SUCCESS, GET_ALERTS_FAILURE
+         UPDATE_RELEASE_RESPONSE, GET_ALERTS, GET_ALERTS_SUCCESS, GET_ALERTS_FAILURE,
+         API_TOKEN_LOADING, API_TOKEN, API_TOKEN_RESPONSE,
+         GET_SCHEDULES, GET_SCHEDULES_RESPONSE, DELETE_SCHEDULE, DELETE_SCHEDULE_RESPONSE,
+         GET_CUSTOMER_USERS, GET_CUSTOMER_USERS_SUCCESS, GET_CUSTOMER_USERS_FAILURE,
+         CREATE_USER, CREATE_USER_RESPONSE
        } from '../actions/customers';
 
 import { sortVersionStrings, isDefinedNotNull } from '../utils/ObjectUtils';
@@ -22,6 +26,7 @@ import { getInitialState, setLoadingState, setSuccessState, setFailureState, set
 const INITIAL_STATE = {
   currentCustomer: getInitialState({}),
   authToken: getInitialState({}),
+  apiToken: getInitialState(null),
   tasks: [],
   status: null,
   error: null,
@@ -38,12 +43,16 @@ const INITIAL_STATE = {
   addConfig: getInitialState({}),
   configs: getInitialState([]),
   deleteConfig: getInitialState({}),
+  deleteSchedule: getInitialState({}),
   releases: getInitialState([]),
   refreshReleases: getInitialState({}),
   importRelease: getInitialState({}),
   updateRelease: getInitialState({}),
   addCertificate: getInitialState({}),
   userCertificates: getInitialState({}),
+  users: getInitialState([]),
+  schedules: getInitialState([]),
+  createUser: getInitialState({})
 };
 
 export default function(state = INITIAL_STATE, action) {
@@ -61,6 +70,13 @@ export default function(state = INITIAL_STATE, action) {
       return setLoadingState(state, "authToken", {});
     case LOGIN_RESPONSE:
       return setPromiseResponse(state, "authToken", action);
+
+    case API_TOKEN_LOADING:
+      return setLoadingState(state, "apiToken", null);
+    case API_TOKEN:
+      return setLoadingState(state, "apiToken", null);
+    case API_TOKEN_RESPONSE:
+      return setPromiseResponse(state, "apiToken", action);
 
     case INSECURE_LOGIN:
       return {
@@ -99,7 +115,7 @@ export default function(state = INITIAL_STATE, action) {
     case ADD_TLS_CERT_RESPONSE:
       if (action.payload.status !== 200) {
         if (isDefinedNotNull(action.payload.data)) {
-          return setFailureState(state, "addCertificate", action.payload.data.error);
+          return setFailureState(state, "addCertificate", action.payload.response.data.error);
         } else {
           return state;
         }
@@ -113,13 +129,13 @@ export default function(state = INITIAL_STATE, action) {
       return {...state, hostInfo: action.payload.data};
     case FETCH_HOST_INFO_FAILURE:
       return {...state, hostInfo: null };
-
+    
     case UPDATE_PROFILE:
       return setLoadingState(state, "profile");
     case UPDATE_PROFILE_SUCCESS:
       return setSuccessState(state, "profile", "updated-success");
     case UPDATE_PROFILE_FAILURE:
-      return setFailureState(state, "profile", action.payload.data.error);
+      return setFailureState(state, "profile", action.payload.response.data.error);
     case FETCH_CUSTOMER_COUNT:
       return setLoadingState(state, "customerCount");
     case GET_ALERTS:
@@ -164,11 +180,35 @@ export default function(state = INITIAL_STATE, action) {
       return setPromiseResponse(state, "deleteConfig", action);
 
     case GET_LOGS:
-      return {...state, yugaware_logs: null};
+      return {
+        ...state,
+        yugaware_logs: null
+      };
     case GET_LOGS_SUCCESS:
-      return {...state, yugaware_logs: action.payload.data.lines.reverse()};
+      return {
+        ...state,
+        yugaware_logs: action.payload.data.lines.reverse(),
+        yugawareLogError: false
+      };
     case GET_LOGS_FAILURE:
-      return {...state, yugaware_logs: null };
+      return {
+        ...state,
+        yugaware_logs: null,
+        yugawareLogError: true
+      };
+
+    case GET_CUSTOMER_USERS:
+      return setLoadingState(state, "users", getInitialState([]));
+    case GET_CUSTOMER_USERS_SUCCESS:
+      return setSuccessState(state, "users", action.payload.data);
+    case GET_CUSTOMER_USERS_FAILURE:
+      return setFailureState(state, "users", action.payload);
+
+    case CREATE_USER:
+      return setLoadingState(state, "createUser", {});
+    case CREATE_USER_RESPONSE:
+      return setPromiseResponse(state, "createUser", action);
+
     case GET_RELEASES:
       return setLoadingState(state, "releases", []);
     case GET_RELEASES_RESPONSE:
@@ -185,6 +225,14 @@ export default function(state = INITIAL_STATE, action) {
       return setLoadingState(state, "updateRelease", {});
     case UPDATE_RELEASE_RESPONSE:
       return setPromiseResponse(state, "updateRelease", action);
+    case GET_SCHEDULES:
+      return setLoadingState(state, "schedules", []);
+    case GET_SCHEDULES_RESPONSE:
+      return setPromiseResponse(state, "schedules", action);
+    case DELETE_SCHEDULE:
+      return setLoadingState(state, "deleteSchedule", {});
+    case DELETE_SCHEDULE_RESPONSE:
+      return setPromiseResponse(state, "deleteSchedule", action);
 
     default:
       return state;

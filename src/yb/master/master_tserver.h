@@ -44,6 +44,8 @@ class MasterTabletServer : public tserver::TabletServerIf,
   CHECKED_STATUS GetTabletStatus(const tserver::GetTabletStatusRequestPB* req,
                                  tserver::GetTabletStatusResponsePB* resp) const override;
 
+  bool LeaderAndReady(const TabletId& tablet_id, bool allow_stale = false) const override;
+
   const NodeInstancePB& NodeInstance() const override;
 
   CHECKED_STATUS GetRegistration(ServerRegistrationPB* reg) const override;
@@ -51,6 +53,14 @@ class MasterTabletServer : public tserver::TabletServerIf,
   CHECKED_STATUS StartRemoteBootstrap(const consensus::StartRemoteBootstrapRequestPB& req) override;
 
   uint64_t ysql_catalog_version() const override;
+
+  client::TransactionPool* TransactionPool() override {
+    return nullptr;
+  }
+
+  client::YBClient* client() override {
+    return nullptr;
+  }
 
  private:
   Master* master_ = nullptr;

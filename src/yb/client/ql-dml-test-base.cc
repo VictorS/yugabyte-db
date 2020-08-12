@@ -20,17 +20,22 @@
 #include "yb/client/session.h"
 #include "yb/client/table.h"
 
+#include "yb/common/ql_name.h"
+#include "yb/common/ql_value.h"
+
 #include "yb/util/bfql/gen_opcodes.h"
 
 #include "yb/yql/cql/ql/util/errcodes.h"
 #include "yb/yql/cql/ql/util/statement_result.h"
+
+DECLARE_bool(enable_ysql);
 
 using namespace std::literals;
 
 namespace yb {
 namespace client {
 
-const client::YBTableName kTableName("my_keyspace", "ql_client_test_table");
+const client::YBTableName kTableName(YQL_DATABASE_CQL, "my_keyspace", "ql_client_test_table");
 const std::string KeyValueTableTest::kKeyColumn = "key";
 const std::string KeyValueTableTest::kValueColumn = "value";
 
@@ -51,6 +56,7 @@ QLWriteRequestPB::QLStmtType GetQlStatementType(const WriteOpType op_type) {
 } // namespace
 
 void QLDmlTestBase::SetUp() {
+  SetAtomicFlag(false, &FLAGS_enable_ysql);
   HybridTime::TEST_SetPrettyToString(true);
 
   YBMiniClusterTestBase::SetUp();
@@ -61,8 +67,9 @@ void QLDmlTestBase::SetUp() {
 
   ASSERT_OK(CreateClient());
 
-  // Create test table
-  ASSERT_OK(client_->CreateNamespaceIfNotExists(kTableName.namespace_name()));
+  // Create test namespace.
+  ASSERT_OK(client_->CreateNamespaceIfNotExists(kTableName.namespace_name(),
+                                                kTableName.namespace_type()));
 }
 
 void QLDmlTestBase::DoTearDown() {
@@ -80,6 +87,13 @@ void QLDmlTestBase::DoTearDown() {
 
 void KeyValueTableTest::CreateTable(Transactional transactional) {
   CreateTable(transactional, NumTablets(), client_.get(), &table_);
+}
+
+void KeyValueTableTest::CreateIndex(Transactional transactional,
+                                    int indexed_column_index,
+                                    bool use_mangled_names) {
+  CreateIndex(
+      transactional, indexed_column_index, use_mangled_names, table_, client_.get(), &index_);
 }
 
 Result<YBqlWriteOpPtr> KeyValueTableTest::Increment(
@@ -109,7 +123,8 @@ Result<YBqlWriteOpPtr> KeyValueTableTest::Increment(
 
 void KeyValueTableTest::CreateTable(
     Transactional transactional, int num_tablets, YBClient* client, TableHandle* table) {
-  ASSERT_OK(client->CreateNamespaceIfNotExists(kTableName.namespace_name()));
+  ASSERT_OK(client->CreateNamespaceIfNotExists(kTableName.namespace_name(),
+                                               kTableName.namespace_type()));
 
   YBSchemaBuilder builder;
   builder.AddColumn(kKeyColumn)->Type(INT32)->HashPrimaryKey()->NotNull();
@@ -123,8 +138,73 @@ void KeyValueTableTest::CreateTable(
   ASSERT_OK(table->Create(kTableName, num_tablets, client, &builder));
 }
 
+void KeyValueTableTest::CreateIndex(Transactional transactional,
+                                    int indexed_column_index,
+                                    bool use_mangled_names,
+                                    const TableHandle& table,
+                                    YBClient* client,
+                                    TableHandle* index) {
+  const YBSchema& schema = table.schema();
+  DCHECK_LT(indexed_column_index, schema.num_columns());
+
+  // When creating an index, we construct IndexInfo and associated it with the data-table.
+  IndexInfoPB index_info;
+  index_info.set_indexed_table_id(table->id());
+  index_info.set_is_local(false);
+  index_info.set_is_unique(false);
+  index_info.set_use_mangled_column_name(use_mangled_names);
+
+  // List key columns of data-table being indexed.
+  index_info.set_hash_column_count(1);
+  index_info.add_indexed_hash_column_ids(schema.ColumnId(0));
+
+  auto* column = index_info.add_columns();
+  const string name = schema.Column(indexed_column_index).name();
+  column->set_column_name(use_mangled_names ? YcqlName::MangleColumnName(name) : name);
+  column->set_indexed_column_id(schema.ColumnId(indexed_column_index));
+
+  // Setup Index table schema.
+  YBSchemaBuilder builder;
+  builder.AddColumn(use_mangled_names ? YcqlName::MangleColumnName(name) : name)
+      ->Type(schema.Column(indexed_column_index).type())
+      ->NotNull()
+      ->HashPrimaryKey();
+
+  size_t num_range_keys = 0;
+  for (size_t i = 0; i < schema.num_hash_key_columns(); ++i) {
+    if (i != indexed_column_index) {
+      const string name = schema.Column(i).name();
+      builder.AddColumn(use_mangled_names ? YcqlName::MangleColumnName(name) : name)
+          ->Type(schema.Column(i).type())
+          ->NotNull()
+          ->PrimaryKey();
+
+      column = index_info.add_columns();
+      column->set_column_name(use_mangled_names ? YcqlName::MangleColumnName(name) : name);
+      column->set_indexed_column_id(schema.ColumnId(i));
+      ++num_range_keys;
+    }
+  }
+
+  index_info.set_range_column_count(num_range_keys);
+  TableProperties table_properties;
+  table_properties.SetUseMangledColumnName(use_mangled_names);
+
+  if (transactional) {
+    table_properties.SetTransactional(true);
+  }
+
+  builder.SetTableProperties(table_properties);
+
+  const YBTableName index_name(YQL_DATABASE_CQL, table.name().namespace_name(),
+      table.name().table_name() + '_' + schema.Column(indexed_column_index).name() + "_idx");
+
+  ASSERT_OK(index->Create(index_name, schema.table_properties().num_tablets(),
+      client, &builder, &index_info));
+}
+
 int KeyValueTableTest::NumTablets() {
-  return CalcNumTablets(3);
+  return num_tablets_;
 }
 
 Result<YBqlWriteOpPtr> KeyValueTableTest::WriteRow(

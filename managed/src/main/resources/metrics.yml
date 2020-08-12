@@ -111,12 +111,43 @@ memory_usage:
 
 
 container_cpu_usage:
-  metric: "container_cpu_usage_seconds_total"
-  function: "rate|sum"
+  metric: "container_cpu_usage_seconds_total/container_cpu_request"
+  function: "rate|avg"
   range: "1m"
   filters:
     pod_name: "yb-tserver-(.*)"
-  group_by: "saved_name"
+    container_name: "yb-tserver"
+  layout:
+    title: "CPU Usage"
+    xaxis:
+      type: "date"
+    yaxis:
+      alias:
+        "container_cpu_usage_seconds_total/container_cpu_request": "cpu_usage"
+      ticksuffix: "&nbsp;%"
+
+container_cpu_request:
+  metric: "kube_pod_container_resource_requests_cpu_cores"
+  function: "avg"
+  filters:
+    pod_name: "yb-tserver-(.*)"
+    container_name: "yb-tserver"
+  layout:
+    title: "CPU Request"
+    xaxis:
+      type: "date"
+    yaxis:
+      alias:
+        "kube_pod_container_resource_requests_cpu_cores": "cpu_requests"
+      ticksuffix: "&nbsp;"
+
+container_cpu_usage_seconds_total:
+  metric: "container_cpu_usage_seconds_total"
+  function: "rate|avg"
+  range: "1m"
+  filters:
+    pod_name: "yb-tserver-(.*)"
+    container_name: "yb-tserver"
   layout:
     title: "CPU Usage"
     xaxis:
@@ -127,24 +158,27 @@ container_cpu_usage:
       ticksuffix: "&nbsp;"
 
 container_memory_usage:
-  metric: "container_memory_usage_bytes"
-  function: "sum"
+  metric: "container_memory_working_set_bytes"
+  function: "avg"
   operator: "/ 1073741824"
   filters:
     pod_name: "yb-tserver-(.*)"
+    container_name: "yb-tserver"
   layout:
     title: "Memory Usage"
     xaxis:
       type: "date"
     yaxis:
       ticksuffix: "&nbsp;GB"
+      alias:
+        "container_memory_working_set_bytes": "memory_usage"
 
 container_volume_stats:
-  metric: "container_fs_usage_bytes"
+  metric: "kubelet_volume_stats_used_bytes"
   function: "sum"
   operator: "/ 1073741824"
   filters:
-    pod_name: "yb-tserver-(.*)"
+    persistentvolumeclaim: "(.*)-yb-tserver-(.*)"
   layout:
     title: "Persistent Volume Stats"
     xaxis:
@@ -152,14 +186,14 @@ container_volume_stats:
     yaxis:
       ticksuffix: "&nbsp;GB"
       alias:
-        "container_fs_usage_bytes": "used"
+        "kubelet_volume_stats_used_bytes": "used"
 
 container_volume_max_usage:
-  metric: "container_fs_limit_bytes"
+  metric: "kubelet_volume_stats_capacity_bytes"
   function: "sum"
   operator: "/ 1073741824"
   filters:
-    pod_name: "yb-tserver-(.*)"
+    persistentvolumeclaim: "(.*)-yb-tserver-(.*)"
   layout:
     title: "Persistent Volume Stats"
     xaxis:
@@ -167,7 +201,7 @@ container_volume_max_usage:
     yaxis:
       ticksuffix: "&nbsp;GB"
       alias:
-        "container_fs_limit_bytes": "used"
+        "kubelet_volume_stats_capacity_bytes": "used"
 
 network_bytes:
   metric: ""
@@ -312,6 +346,124 @@ redis_rpcs_per_sec_all:
         "command": "Command"
         "quit": "Quit"
         "flushdb": "FlushDB"
+
+redis_server_rpc_p95:
+  metric: "rpc_latency"
+  function: "max"
+  operator: "> 0"
+  filters:
+    server_type: "yb_redisserver"
+    service_type: "RedisServerService"
+    quantile: "p95"
+  group_by: "service_method"
+  layout:
+    title: "YEDIS Op Latency (P95)"
+    xaxis:
+      type: "date"
+    yaxis:
+      alias:
+        "get": "Get"
+        "mget": "MGet"
+        "hget": "HGet"
+        "tsget": "TsGet"
+        "hmget": "HMGet"
+        "hgetall": "HGetAll"
+        "hkeys": "HKeys"
+        "hvals": "HVals"
+        "hlen": "HLen"
+        "hexists": "HExists"
+        "hstrlen": "HStrLen"
+        "smembers": "SMembers"
+        "sismember": "SIsMember"
+        "scard": "SCard"
+        "strlen": "StrLen"
+        "exists": "Exists"
+        "getrange": "GetRange"
+        "set": "Set"
+        "mset": "MSet"
+        "hset": "HSet"
+        "hincrby": "HIncrBy"
+        "hmset": "HMSet"
+        "hdel": "HDel"
+        "sadd": "SAdd"
+        "srem": "SRem"
+        "tsadd": "TsAdd"
+        "tsrangebytime": "TsRangeByTime"
+        "tsrem": "TsRem"
+        "getset": "GetSet"
+        "append": "Append"
+        "del": "Del"
+        "setrange": "SetRange"
+        "incr": "Incr"
+        "echo": "Echo"
+        "auth": "Auth"
+        "config": "Config"
+        "info": "Info"
+        "role": "Role"
+        "ping": "Ping"
+        "command": "Command"
+        "quit": "Quit"
+        "flushdb": "FlushDB"
+      ticksuffix: "&nbsp;\u00B5s"
+
+redis_server_rpc_p99:
+  metric: "rpc_latency"
+  function: "max"
+  operator: "> 0"
+  filters:
+    server_type: "yb_redisserver"
+    service_type: "RedisServerService"
+    quantile: "p99"
+  group_by: "service_method"
+  layout:
+    title: "YEDIS Op Latency (P99)"
+    xaxis:
+      type: "date"
+    yaxis:
+      alias:
+        "get": "Get"
+        "mget": "MGet"
+        "hget": "HGet"
+        "tsget": "TsGet"
+        "hmget": "HMGet"
+        "hgetall": "HGetAll"
+        "hkeys": "HKeys"
+        "hvals": "HVals"
+        "hlen": "HLen"
+        "hexists": "HExists"
+        "hstrlen": "HStrLen"
+        "smembers": "SMembers"
+        "sismember": "SIsMember"
+        "scard": "SCard"
+        "strlen": "StrLen"
+        "exists": "Exists"
+        "getrange": "GetRange"
+        "set": "Set"
+        "mset": "MSet"
+        "hset": "HSet"
+        "hincrby": "HIncrBy"
+        "hmset": "HMSet"
+        "hdel": "HDel"
+        "sadd": "SAdd"
+        "srem": "SRem"
+        "tsadd": "TsAdd"
+        "tsrangebytime": "TsRangeByTime"
+        "tsrem": "TsRem"
+        "getset": "GetSet"
+        "append": "Append"
+        "del": "Del"
+        "setrange": "SetRange"
+        "incr": "Incr"
+        "echo": "Echo"
+        "auth": "Auth"
+        "config": "Config"
+        "info": "Info"
+        "role": "Role"
+        "ping": "Ping"
+        "command": "Command"
+        "quit": "Quit"
+        "flushdb": "FlushDB"
+      ticksuffix: "&nbsp;\u00B5s"
 
 redis_rpcs_per_sec_hash:
   metric: "rpc_latency_count"
@@ -475,7 +627,7 @@ redis_ops_latency_all:
     service_type: "RedisServerService"
   group_by: "service_method"
   layout:
-    title: "YEDIS Op Latency"
+    title: "YEDIS Op Latency (Avg)"
     xaxis:
       type: "date"
     yaxis:
@@ -1288,6 +1440,20 @@ lsm_rocksdb_stalls:
         "rocksdb_stall_micros": "Stalls"
       ticksuffix: "&nbsp;\u00B5s"
 
+lsm_rocksdb_write_rejections:
+  metric: "majority_sst_files_rejections"
+  function: "rate|sum without (table_id, table_name)|avg"
+  range: "1m"
+  filters:
+    export_type: "tserver_export"
+  layout:
+    title: "Rejections"
+    xaxis:
+      type: "date"
+    yaxis:
+      alias:
+        "majority_sst_files_rejections": "Rejections"
+
 lsm_rocksdb_flush_size:
   metric: "rocksdb_flush_write_bytes"
   function: "rate|sum without (table_id, table_name)|avg"
@@ -1377,7 +1543,7 @@ ysql_server_rpc_per_second:
     export_type: "ysql_export"
     server_type: "yb_ysqlserver"
     service_type: "SQLProcessor"
-    service_method: "SelectStmt|InsertStmt|UpdateStmt|DeleteStmt|OtherStmts"
+    service_method: "SelectStmt|InsertStmt|UpdateStmt|DeleteStmt|OtherStmts|Transactions"
   group_by: "service_method"
   layout:
     title: "Total YSQL Ops / Sec"
@@ -1389,7 +1555,8 @@ ysql_server_rpc_per_second:
         "InsertStmt": "Insert"
         "UpdateStmt": "Update"
         "DeleteStmt": "Delete"
-        "OtherStmt": "Other"
+        "OtherStmts": "Other"
+        "Transactions": "Transactions"
 
 ysql_sql_latency:
   metric: "rpc_latency.avg"
@@ -1399,10 +1566,10 @@ ysql_sql_latency:
     export_type: "ysql_export"
     server_type: "yb_ysqlserver"
     service_type: "SQLProcessor"
-    service_method: "SelectStmt|InsertStmt|UpdateStmt|DeleteStmt|OtherStmts"
+    service_method: "SelectStmt|InsertStmt|UpdateStmt|DeleteStmt|OtherStmts|Transactions"
   group_by: "service_method"
   layout:
-    title: "YSQL Op Latency"
+    title: "YSQL Op Latency (Avg)"
     xaxis:
       type: "date"
     yaxis:
@@ -1412,6 +1579,55 @@ ysql_sql_latency:
         "UpdateStmt": "Update"
         "DeleteStmt": "Delete"
         "OtherStmts": "Others"
+        "Transactions": "Transactions"
+      ticksuffix: "&nbsp;\u00B5s"
+
+ysql_server_rpc_p95:
+  metric: "rpc_latency"
+  function: "max"
+  filters:
+    export_type: "ysql_export"
+    server_type: "yb_ysqlserver"
+    service_type: "SQLProcessor"
+    service_method: "SelectStmt|InsertStmt|UpdateStmt|DeleteStmt|OtherStmts|Transactions"
+    quantile: "p95"
+  group_by: "service_method"
+  layout:
+    title: "YSQL Op Latency (P95)"
+    xaxis:
+      type: "date"
+    yaxis:
+      alias:
+        "SelectStmt": "Select"
+        "InsertStmt": "Insert"
+        "UpdateStmt": "Update"
+        "DeleteStmt": "Delete"
+        "OtherStmts": "Other"
+        "Transactions": "Transactions"
+      ticksuffix: "&nbsp;\u00B5s"
+
+ysql_server_rpc_p99:
+  metric: "rpc_latency"
+  function: "max"
+  filters:
+    export_type: "ysql_export"
+    server_type: "yb_ysqlserver"
+    service_type: "SQLProcessor"
+    service_method: "SelectStmt|InsertStmt|UpdateStmt|DeleteStmt|OtherStmts|Transactions"
+    quantile: "p99"
+  group_by: "service_method"
+  layout:
+    title: "YSQL Op Latency (P99)"
+    xaxis:
+      type: "date"
+    yaxis:
+      alias:
+        "SelectStmt": "Select"
+        "InsertStmt": "Insert"
+        "UpdateStmt": "Update"
+        "DeleteStmt": "Delete"
+        "OtherStmts": "Other"
+        "Transactions": "Transactions"
       ticksuffix: "&nbsp;\u00B5s"
 
 #Cassandra Metrics
@@ -1423,7 +1639,7 @@ cql_server_rpc_per_second:
   filters:
     server_type: "yb_cqlserver"
     service_type: "SQLProcessor"
-    service_method: "SelectStmt|InsertStmt|UpdateStmt|DeleteStmt|OtherStmts"
+    service_method: "SelectStmt|InsertStmt|UpdateStmt|DeleteStmt|OtherStmts|Transaction"
   group_by: "service_method"
   layout:
     title: "Total YCQL Ops / Sec"
@@ -1436,6 +1652,7 @@ cql_server_rpc_per_second:
         "UpdateStmt": "Update"
         "DeleteStmt": "Delete"
         "OtherStmts": "Other"
+        "Transaction": "Transactions"
 
 cql_sql_latency:
   metric: "rpc_latency.avg"
@@ -1445,10 +1662,10 @@ cql_sql_latency:
   filters:
     server_type: "yb_cqlserver"
     service_type: "SQLProcessor"
-    service_method: "SelectStmt|InsertStmt|UpdateStmt|DeleteStmt|OtherStmts"
+    service_method: "SelectStmt|InsertStmt|UpdateStmt|DeleteStmt|OtherStmts|Transaction"
   group_by: "service_method"
   layout:
-    title: "YCQL Op Latency"
+    title: "YCQL Op Latency (Avg)"
     xaxis:
       type: "date"
     yaxis:
@@ -1458,7 +1675,54 @@ cql_sql_latency:
         "UpdateStmt": "Update"
         "DeleteStmt": "Delete"
         "OtherStmts": "Others"
+        "Transaction": "Transactions"
       #ticksuffix: "&nbsp;ms"
+      ticksuffix: "&nbsp;\u00B5s"
+
+cql_server_rpc_p95:
+  metric: "rpc_latency"
+  function: "max"
+  filters:
+    server_type: "yb_cqlserver"
+    service_type: "SQLProcessor"
+    service_method: "SelectStmt|InsertStmt|UpdateStmt|DeleteStmt|OtherStmts|Transaction"
+    quantile: "p95"
+  group_by: "service_method"
+  layout:
+    title: "YCQL Op Latency (P95)"
+    xaxis:
+      type: "date"
+    yaxis:
+      alias:
+        "SelectStmt": "Select"
+        "InsertStmt": "Insert"
+        "UpdateStmt": "Update"
+        "DeleteStmt": "Delete"
+        "OtherStmts": "Other"
+        "Transaction": "Transactions"
+      ticksuffix: "&nbsp;\u00B5s"
+
+cql_server_rpc_p99:
+  metric: "rpc_latency"
+  function: "max"
+  filters:
+    server_type: "yb_cqlserver"
+    service_type: "SQLProcessor"
+    service_method: "SelectStmt|InsertStmt|UpdateStmt|DeleteStmt|OtherStmts|Transaction"
+    quantile: "p99"
+  group_by: "service_method"
+  layout:
+    title: "YCQL Op Latency (P99)"
+    xaxis:
+      type: "date"
+    yaxis:
+      alias:
+        "SelectStmt": "Select"
+        "InsertStmt": "Insert"
+        "UpdateStmt": "Update"
+        "DeleteStmt": "Delete"
+        "OtherStmts": "Other"
+        "Transaction": "Transactions"
       ticksuffix: "&nbsp;\u00B5s"
 
 cql_sql_latency_breakdown:
@@ -1485,12 +1749,11 @@ cql_sql_latency_breakdown:
 
 cql_yb_rpc_connections:
   metric: "rpc_connections_alive"
-  function: "irate|avg"
-  range: "1m"
+  function: "sum"
   filters:
-    metric_id: "yb.cqlserver"
+    export_type: "cql_export"
   layout:
-    title: "YCQL Inbound Connections"
+    title: "Inbound RPC Connections Alive"
     xaxis:
       type: "date"
 
@@ -1499,7 +1762,7 @@ cql_yb_local_vs_remote:
   function: "rate|avg"
   range: "1m"
   filters:
-    export_type: "cql_export"
+    export_type: "cql_export|tserver_export"
     service_type: "read|write"
     service_method: "local|remote"
   group_by: "service_method,service_type"
@@ -1519,7 +1782,7 @@ cql_yb_latency:
   function: "irate|avg"
   range: "1m"
   filters:
-    export_type: "cql_export"
+    export_type: "cql_export|tserver_export"
     service_type: "read|write"
     service_method: "local|remote"
   group_by: "service_method,service_type"
@@ -1588,3 +1851,259 @@ response_sizes:
     yaxis:
       alias:
         "ResponseSize": "Response Size"
+
+tserver_rpc_queue_size_master:
+  metric: "rpcs_in_queue_yb_master_MasterService"
+  function: "max"
+  layout:
+    title: "RPC Queue Size"
+    xaxis:
+      type: "date"
+    yaxis:
+      alias:
+        "rpcs_in_queue_yb_master_MasterService": "Master RPC"
+
+# Note that the aliases here encode all the possible services, because we're using a simple regex
+# for the saved_name filter.
+tserver_rpc_queue_size_tserver:
+  metric: ""
+  function: "max"
+  filters:
+    saved_name: "rpcs_in_queue_.*"
+    export_type: "tserver_export"
+  group_by: "saved_name"
+  layout:
+    title: "RPC Queue Size"
+    xaxis:
+      type: "date"
+    yaxis:
+      alias:
+        "rpcs_in_queue_yb_consensus_ConsensusService": "Consensus"
+        "rpcs_in_queue_yb_server_GenericService": "Generic"
+        "rpcs_in_queue_yb_tserver_RemoteBootstrapService": "RemoteBootstrap"
+        "rpcs_in_queue_yb_tserver_TabletServerService": "TS RPC"
+        "rpcs_in_queue_yb_tserver_TabletServerBackupService": "Backups"
+        "rpcs_in_queue_yb_tserver_TabletServerAdminService": "Admin"
+        "rpcs_in_queue_yb_cdc_CDCService": "CDC"
+
+tserver_rpc_queue_size_cql:
+  metric: ""
+  function: "max"
+  filters:
+    saved_name: "rpcs_in_queue_yb_cqlserver_CQLServerService"
+    export_type: "cql_export"
+  group_by: "saved_name"
+  layout:
+    title: "RPC Queue Size"
+    xaxis:
+      type: "date"
+    yaxis:
+      alias:
+        "rpcs_in_queue_yb_cqlserver_CQLServerService": "YCQL RPC"
+
+tserver_rpc_queue_size_redis:
+  metric: ""
+  function: "max"
+  filters:
+    saved_name: "rpcs_in_queue_yb_redisserver_RedisServerService"
+    export_type: "redis_export"
+  group_by: "saved_name"
+  layout:
+    title: "RPC Queue Size"
+    xaxis:
+      type: "date"
+    yaxis:
+      alias:
+        "rpcs_in_queue_yb_redisserver_RedisServerService": "YEDIS RPC"
+
+tserver_async_replication_lag_micros:
+  metric: ""
+  operator: "/ 1000"
+  function: "max without (table_id, table_name, stream_id)"
+  filters:
+    saved_name: "async_replication_sent_lag_micros|async_replication_committed_lag_micros"
+  layout:
+    title: "Async Replication Lag"
+    xaxis:
+      type: "date"
+    yaxis:
+      alias:
+        "async_replication_sent_lag_micros": "Sent Lag (Milliseconds)"
+        "async_replication_committed_lag_micros": "Committed Lag (Milliseconds)"
+
+master_overall_rpc_rate:
+  metric: "rpc_inbound_calls_created"
+  function: "rate"
+  range: "1m"
+  filters:
+    export_type: "master_export"
+  layout:
+    title: "Overall RPCs / sec"
+    xaxis:
+      type: "date"
+    yaxis:
+      alias:
+        "useInstanceName": "True"
+
+master_get_tablet_location:
+  metric: "rpc_latency_count"
+  function: "rate"
+  range: "1m"
+  filters:
+    export_type: "master_export"
+    service_type: "MasterService"
+    service_method: "GetTabletLocations"
+  layout:
+    title: "GetTabletLocations / sec"
+    xaxis:
+      type: "date"
+    yaxis:
+      alias:
+        "useInstanceName": "True"
+
+master_tsservice_reads:
+  metric: "rpc_latency_count"
+  function: "rate"
+  range: "1m"
+  filters:
+    export_type: "master_export"
+    service_type: "TabletServerService"
+    service_method: "Read"
+  layout:
+    title: "Master TSService Reads / sec"
+    xaxis:
+      type: "date"
+    yaxis:
+      alias:
+        "useInstanceName": "True"
+
+master_tsservice_writes:
+  metric: "rpc_latency_count"
+  function: "rate"
+  range: "1m"
+  filters:
+    export_type: "master_export"
+    service_type: "TabletServerService"
+    service_method: "Write"
+  layout:
+    title: "Master TSService Writes / sec"
+    xaxis:
+      type: "date"
+    yaxis:
+      alias:
+        "useInstanceName": "True"
+
+master_ts_heartbeats:
+  metric: "rpc_latency_count"
+  function: "rate"
+  range: "1m"
+  filters:
+    export_type: "master_export"
+    service_type: "MasterService"
+    service_method: "TSHeartbeat"
+  layout:
+    title: "TS Heartbeats / sec"
+    xaxis:
+      type: "date"
+    yaxis:
+      alias:
+        "useInstanceName": "True"
+
+master_consensus_update:
+  metric: "rpc_latency_count"
+  function: "rate"
+  range: "1m"
+  filters:
+    export_type: "master_export"
+    service_type: "ConsensusService"
+    service_method: "UpdateConsensus"
+  layout:
+    title: "UpdateConsensus / sec"
+    xaxis:
+      type: "date"
+    yaxis:
+      alias:
+        "useInstanceName": "True"
+
+master_table_ops:
+  metric: "rpc_latency_count"
+  function: "sum"
+  filters:
+    export_type: "master_export"
+    service_type: "MasterService"
+    saved_name: "handler_latency_yb_master_MasterService_DeleteTable_count|handler_latency_yb_master_MasterService_CreateTable_count"
+  group_by: "saved_name"
+  layout:
+    title: "Create/Delete Table RPCs"
+    xaxis:
+      type: "date"
+    yaxis:
+      alias:
+        "handler_latency_yb_master_MasterService_DeleteTable_count": "Delete Table"
+        "handler_latency_yb_master_MasterService_CreateTable_count": "Create Table"
+
+master_cpu_util_secs:
+  metric: "cpu_utime|cpu_stime"
+  function: "rate"
+  range: "1m"
+  operator: "/ 1000"
+  filters:
+    export_type: "master_export"
+  layout:
+    title: "CPU Util Secs / Sec"
+    xaxis:
+      type: "date"
+    yaxis:
+      alias:
+        "useInstanceName": "True"
+        "cpu_utime": "cpu_utime"
+        "cpu_stime": "cpu_stime"
+
+tserver_cpu_util_secs:
+  metric: "cpu_utime|cpu_stime"
+  function: "rate|avg"
+  range: "1m"
+  operator: "/ 1000"
+  filters:
+    export_type: "tserver_export"
+  layout:
+    title: "CPU Util Secs / Sec"
+    xaxis:
+      type: "date"
+    yaxis:
+      alias:
+        "cpu_utime": "cpu_utime"
+        "cpu_stime": "cpu_stime"
+
+redis_yb_rpc_connections:
+  metric: "rpc_connections_alive"
+  function: "sum"
+  filters:
+    export_type: "redis_export"
+  layout:
+    title: "Inbound RPC Connections Alive"
+    xaxis:
+      type: "date"
+
+tserver_yb_rpc_connections:
+  metric: "rpc_connections_alive"
+  function: "sum"
+  filters:
+    export_type: "tserver_export"
+  layout:
+    title: "Inbound RPC Connections Alive"
+    xaxis:
+      type: "date"
+
+master_yb_rpc_connections:
+  metric: "rpc_connections_alive"
+  function: ""
+  filters:
+    export_type: "master_export"
+  layout:
+    title: "Inbound RPC Connections Alive"
+    xaxis:
+      type: "date"
+    yaxis:
+      alias:
+        "useInstanceName": "True"

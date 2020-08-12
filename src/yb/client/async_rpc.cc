@@ -22,6 +22,7 @@
 
 #include "yb/common/pgsql_error.h"
 #include "yb/common/transaction.h"
+#include "yb/common/transaction_error.h"
 #include "yb/common/wire_protocol.h"
 
 #include "yb/gutil/strings/substitute.h"
@@ -119,6 +120,7 @@ AsyncRpc::AsyncRpc(AsyncRpcData* data, YBConsistencyLevel yb_consistency_level)
       ops_(std::move(data->ops)),
       start_(MonoTime::Now()),
       async_rpc_metrics_(data->batcher->async_rpc_metrics()) {
+
   mutable_retrier()->mutable_controller()->set_allow_local_calls_in_curr_thread(
       data->allow_local_calls_in_curr_thread);
   if (Trace::CurrentTrace()) {
@@ -163,6 +165,9 @@ const YBTable* AsyncRpc::table() const {
 void AsyncRpc::Finished(const Status& status) {
   Status new_status = status;
   if (tablet_invoker_.Done(&new_status)) {
+    if (tablet().is_split()) {
+      ops_[0]->yb_op->MarkTablePartitionsAsStale();
+    }
     ProcessResponseFromTserver(new_status);
     batcher_->RemoveInFlightOpsAfterFlushing(ops_, new_status, MakeFlushExtraResult());
     batcher_->CheckForFinishedFlush();
@@ -214,11 +219,17 @@ void AsyncRpc::Failed(const Status& status) {
         resp->set_status(status.IsTryAgain() ? PgsqlResponsePB::PGSQL_STATUS_RESTART_REQUIRED_ERROR
                                              : PgsqlResponsePB::PGSQL_STATUS_RUNTIME_ERROR);
         resp->set_error_message(error_message);
-        const uint8_t* pgerr = status.ErrorData(PgsqlErrorTag::kCategory);
-        if (pgerr != nullptr) {
-          resp->set_pg_error_code(static_cast<uint32_t>(PgsqlErrorTag::Decode(pgerr)));
+        const uint8_t* pg_err_ptr = status.ErrorData(PgsqlErrorTag::kCategory);
+        if (pg_err_ptr != nullptr) {
+          resp->set_pg_error_code(static_cast<uint32_t>(PgsqlErrorTag::Decode(pg_err_ptr)));
         } else {
           resp->set_pg_error_code(static_cast<uint32_t>(YBPgErrorCode::YB_PG_INTERNAL_ERROR));
+        }
+        const uint8_t* txn_err_ptr = status.ErrorData(TransactionErrorTag::kCategory);
+        if (txn_err_ptr != nullptr) {
+          resp->set_txn_error_code(static_cast<uint16_t>(TransactionErrorTag::Decode(txn_err_ptr)));
+        } else {
+          resp->set_txn_error_code(static_cast<uint16_t>(TransactionErrorCode::kNone));
         }
         break;
       }
@@ -248,7 +259,7 @@ void SetTransactionMetadata(const TransactionMetadata& metadata, tserver::ReadRe
 
 } // namespace
 
-void AsyncRpc::SendRpcToTserver() {
+void AsyncRpc::SendRpcToTserver(int attempt_num) {
   MonoTime end_time = MonoTime::Now();
   if (async_rpc_metrics_) {
     async_rpc_metrics_->time_to_send->Increment(end_time.GetDeltaSince(start_).ToMicroseconds());
@@ -258,8 +269,10 @@ void AsyncRpc::SendRpcToTserver() {
 }
 
 template <class Req, class Resp>
-AsyncRpcBase<Req, Resp>::AsyncRpcBase(AsyncRpcData* data, YBConsistencyLevel consistency_level)
+AsyncRpcBase<Req, Resp>::AsyncRpcBase(AsyncRpcData* data,
+                                      YBConsistencyLevel consistency_level)
     : AsyncRpc(data, consistency_level) {
+
   req_.set_tablet_id(tablet_invoker_.tablet()->tablet_id());
   req_.set_include_trace(IsTracingEnabled());
   const ConsistentReadPoint* read_point = batcher_->read_point();
@@ -277,15 +290,17 @@ AsyncRpcBase<Req, Resp>::AsyncRpcBase(AsyncRpcData* data, YBConsistencyLevel con
       }
     }
   }
+  if (!ops_.empty()) {
+    req_.set_batch_idx(ops_.front()->batch_idx);
+  }
   auto& transaction_metadata = batcher_->transaction_metadata();
-  if (!transaction_metadata.transaction_id.is_nil()) {
+  if (!transaction_metadata.transaction_id.IsNil()) {
     SetTransactionMetadata(transaction_metadata, &req_);
     bool serializable = transaction_metadata.isolation == IsolationLevel::SERIALIZABLE_ISOLATION;
     LOG_IF(DFATAL, has_read_time && serializable)
         << "Read time should NOT be specified for serializable isolation: "
         << read_point->GetReadTime().ToString();
   }
-  req_.set_memory_limit_score(data->memory_limit_score);
 }
 
 template <class Req, class Resp>
@@ -308,14 +323,14 @@ bool AsyncRpcBase<Req, Resp>::CommonResponseCheck(const Status& status) {
       read_point->RestartRequired(req_.tablet_id(), restart_read_time);
     }
     Failed(STATUS(TryAgain, Format("Restart read required at: $0", restart_read_time), Slice(),
-                  PgsqlError(YBPgErrorCode::YB_PG_T_R_SERIALIZATION_FAILURE)));
+                  TransactionError(TransactionErrorCode::kReadRestartRequired)));
     return false;
   }
   return true;
 }
 
 template <class Req, class Resp>
-void AsyncRpcBase<Req, Resp>::SendRpcToTserver() {
+void AsyncRpcBase<Req, Resp>::SendRpcToTserver(int attempt_num) {
   if (!tablet_invoker_.current_ts().HasCapability(CAPABILITY_PickReadTimeAtTabletServer)) {
     ConsistentReadPoint* read_point = batcher_->read_point();
     if (read_point && !read_point->GetReadTime()) {
@@ -329,44 +344,22 @@ void AsyncRpcBase<Req, Resp>::SendRpcToTserver() {
     }
   }
 
-  AsyncRpc::SendRpcToTserver();
+  req_.set_rejection_score(batcher_->RejectionScore(attempt_num));
+  AsyncRpc::SendRpcToTserver(attempt_num);
 }
 
 WriteRpc::WriteRpc(AsyncRpcData* data)
     : AsyncRpcBase(data, YBConsistencyLevel::STRONG) {
-  TRACE_TO(trace_, "WriteRpc initiated to $0", data->tablet->tablet_id());
-#ifndef NDEBUG
-  const Schema& schema = GetSchema(table()->schema());
-#endif
 
+  TRACE_TO(trace_, "WriteRpc initiated to $0", data->tablet->tablet_id());
+
+  if (data->write_time_for_backfill_.is_valid()) {
+    req_.set_external_hybrid_time(data->write_time_for_backfill_.ToUint64());
+    ReadHybridTime::SingleTime(data->write_time_for_backfill_).ToPB(req_.mutable_read_time());
+  }
   // Add the rows
   int ctr = 0;
   for (auto& op : ops_) {
-#ifndef NDEBUG
-    const Partition& partition = op->tablet->partition();
-    const PartitionSchema& partition_schema = table()->partition_schema();
-
-    bool partition_contains_row = false;
-    std::string partition_key;
-    switch (op->yb_op->type()) {
-      case YBOperation::QL_READ: FALLTHROUGH_INTENDED;
-      case YBOperation::QL_WRITE: FALLTHROUGH_INTENDED;
-      case YBOperation::PGSQL_READ: FALLTHROUGH_INTENDED;
-      case YBOperation::PGSQL_WRITE: FALLTHROUGH_INTENDED;
-      case YBOperation::REDIS_READ: FALLTHROUGH_INTENDED;
-      case YBOperation::REDIS_WRITE: {
-        CHECK_OK(op->yb_op->GetPartitionKey(&partition_key));
-        partition_contains_row = partition.ContainsKey(partition_key);
-        break;
-      }
-    }
-
-    CHECK(partition_contains_row)
-        << "Row " << op->yb_op->ToString()
-        << " not in partition " << partition_schema.PartitionDebugString(partition, schema)
-        << " partition_key: '" << Slice(partition_key).ToDebugHexString() << "'";
-
-#endif
     // Move write request PB into tserver write request PB for performance.
     // Will restore in ProcessResponseFromTserver.
     switch (op->yb_op->type()) {
@@ -386,6 +379,9 @@ WriteRpc::WriteRpc(AsyncRpcData* data)
         CHECK_EQ(table()->table_type(), YBTableType::PGSQL_TABLE_TYPE);
         auto* pgsql_op = down_cast<YBPgsqlWriteOp*>(op->yb_op.get());
         req_.add_pgsql_write_batch()->Swap(pgsql_op->mutable_request());
+        if (pgsql_op->write_time()) {
+          req_.set_external_hybrid_time(pgsql_op->write_time().ToUint64());
+        }
         break;
       }
       case YBOperation::Type::PGSQL_READ: FALLTHROUGH_INTENDED;
@@ -585,6 +581,7 @@ void WriteRpc::ProcessResponseFromTserver(const Status& status) {
 
 ReadRpc::ReadRpc(AsyncRpcData* data, YBConsistencyLevel yb_consistency_level)
     : AsyncRpcBase(data, yb_consistency_level) {
+
   TRACE_TO(trace_, "ReadRpc initiated to $0", data->tablet->tablet_id());
   req_.set_consistency_level(yb_consistency_level);
   req_.set_proxy_uuid(data->batcher->proxy_uuid());

@@ -97,12 +97,24 @@ class MasterServiceImpl : public MasterServiceIf,
   void CreateNamespace(const CreateNamespaceRequestPB* req,
                        CreateNamespaceResponsePB* resp,
                        rpc::RpcContext rpc) override;
+  void IsCreateNamespaceDone(const IsCreateNamespaceDoneRequestPB* req,
+                             IsCreateNamespaceDoneResponsePB* resp,
+                             rpc::RpcContext rpc) override;
   void DeleteNamespace(const DeleteNamespaceRequestPB* req,
                        DeleteNamespaceResponsePB* resp,
                        rpc::RpcContext rpc) override;
+  void IsDeleteNamespaceDone(const IsDeleteNamespaceDoneRequestPB* req,
+                             IsDeleteNamespaceDoneResponsePB* resp,
+                             rpc::RpcContext rpc) override;
+  void AlterNamespace(const AlterNamespaceRequestPB* req,
+                      AlterNamespaceResponsePB* resp,
+                      rpc::RpcContext rpc) override;
   void ListNamespaces(const ListNamespacesRequestPB* req,
                       ListNamespacesResponsePB* resp,
                       rpc::RpcContext rpc) override;
+  void GetNamespaceInfo(const GetNamespaceInfoRequestPB* req,
+                        GetNamespaceInfoResponsePB* resp,
+                        rpc::RpcContext rpc) override;
 
   void ReservePgsqlOids(const ReservePgsqlOidsRequestPB* req,
                         ReservePgsqlOidsResponsePB* resp,
@@ -111,6 +123,18 @@ class MasterServiceImpl : public MasterServiceIf,
   void GetYsqlCatalogConfig(const GetYsqlCatalogConfigRequestPB* req,
                             GetYsqlCatalogConfigResponsePB* resp,
                             rpc::RpcContext rpc) override;
+
+  void CreateTablegroup(const CreateTablegroupRequestPB* req,
+                        CreateTablegroupResponsePB* resp,
+                        rpc::RpcContext rpc) override;
+
+  void DeleteTablegroup(const DeleteTablegroupRequestPB* req,
+                        DeleteTablegroupResponsePB* resp,
+                        rpc::RpcContext rpc) override;
+
+  void ListTablegroups(const ListTablegroupsRequestPB* req,
+                       ListTablegroupsResponsePB* resp,
+                       rpc::RpcContext rpc) override;
 
   void CreateRole(const CreateRoleRequestPB* req,
                   CreateRoleResponsePB* resp,
@@ -184,6 +208,10 @@ class MasterServiceImpl : public MasterServiceIf,
                                ChangeLoadBalancerStateResponsePB* resp,
                                rpc::RpcContext rpc) override;
 
+  void GetLoadBalancerState(const GetLoadBalancerStateRequestPB* req,
+                            GetLoadBalancerStateResponsePB* resp,
+                            rpc::RpcContext rpc) override;
+
   void RemovedMasterUpdate(const RemovedMasterUpdateRequestPB* req,
                            RemovedMasterUpdateResponsePB* resp,
                            rpc::RpcContext rpc) override;
@@ -224,6 +252,10 @@ class MasterServiceImpl : public MasterServiceIf,
                                  AreLeadersOnPreferredOnlyResponsePB* resp,
                                  rpc::RpcContext rpc) override;
 
+  void AreTransactionLeadersSpread(const AreTransactionLeadersSpreadRequestPB* req,
+                                   AreTransactionLeadersSpreadResponsePB* resp,
+                                   rpc::RpcContext rpc) override;
+
   void FlushTables(const FlushTablesRequestPB* req,
                    FlushTablesResponsePB* resp,
                    rpc::RpcContext rpc) override;
@@ -244,6 +276,18 @@ class MasterServiceImpl : public MasterServiceIf,
                            IsEncryptionEnabledResponsePB* resp,
                            rpc::RpcContext rpc) override;
 
+  void GetUniverseKeyRegistry(const GetUniverseKeyRegistryRequestPB* req,
+                              GetUniverseKeyRegistryResponsePB* resp,
+                              rpc::RpcContext rpc) override;
+
+  void AddUniverseKeys(const AddUniverseKeysRequestPB* req,
+                       AddUniverseKeysResponsePB* resp,
+                       rpc::RpcContext rpc) override;
+
+  void HasUniverseKeyInMemory(const HasUniverseKeyInMemoryRequestPB* req,
+                              HasUniverseKeyInMemoryResponsePB* resp,
+                              rpc::RpcContext rpc) override;
+
   void SetupUniverseReplication(const SetupUniverseReplicationRequestPB* req,
                                 SetupUniverseReplicationResponsePB* resp,
                                 rpc::RpcContext rpc) override;
@@ -252,9 +296,20 @@ class MasterServiceImpl : public MasterServiceIf,
                                  DeleteUniverseReplicationResponsePB* resp,
                                  rpc::RpcContext rpc) override;
 
+  void AlterUniverseReplication(const AlterUniverseReplicationRequestPB* req,
+                                AlterUniverseReplicationResponsePB* resp,
+                                rpc::RpcContext rpc) override;
+
+  void SetUniverseReplicationEnabled(const SetUniverseReplicationEnabledRequestPB* req,
+                                     SetUniverseReplicationEnabledResponsePB* resp,
+                                     rpc::RpcContext rpc) override;
+
   void GetUniverseReplication(const GetUniverseReplicationRequestPB* req,
                               GetUniverseReplicationResponsePB* resp,
                               rpc::RpcContext rpc) override;
+
+  void SplitTablet(
+      const SplitTabletRequestPB* req, SplitTabletResponsePB* resp, rpc::RpcContext rpc) override;
 
  private:
 };

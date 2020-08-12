@@ -6,6 +6,7 @@ import 'react-bootstrap-table/css/react-bootstrap-table.css';
 import { YBLoadingCircleIcon } from '../../common/indicators';
 import { IN_DEVELOPMENT_MODE } from '../../../config';
 import { isDefinedNotNull } from '../../../utils/ObjectUtils';
+import { isNotHidden, isDisabled } from '../../../utils/LayoutUtils';
 import { YBPanelItem } from '../../panels';
 import { NodeAction } from '../../universes';
 import moment from 'moment';
@@ -14,7 +15,7 @@ import pluralize from 'pluralize';
 
 export default class NodeDetailsTable extends Component {
   render() {
-    const { nodeDetails, providerUUID, clusterType } = this.props;
+    const { nodeDetails, providerUUID, clusterType, customer } = this.props;
     const loadingIcon = <YBLoadingCircleIcon size='inline' />;
     const successIcon = <i className="fa fa-check-circle yb-success-color" />;
     const warningIcon = <i className="fa fa-warning yb-fail-color" />;
@@ -26,14 +27,24 @@ export default class NodeDetailsTable extends Component {
       }
       const isMaster = type === "master";
       let href = "";
-      if (IN_DEVELOPMENT_MODE) {
+      if (IN_DEVELOPMENT_MODE || !!customer.INSECURE_apiToken) {
         href = "http://" + row.privateIP + ":" + (isMaster ? row.masterPort : row.tserverPort);
       } else {
         href = "/proxy/" + row.privateIP + ":" + (isMaster ? row.masterPort : row.tserverPort) + "/";
       }
 
       if (row.nodeAlive) {
-        return <div>{successIcon}&nbsp;<a href={href} target="_blank" rel="noopener noreferrer">{isMaster ? "Master" : "TServer"}</a>{(isMaster && row.isMasterLeader) ? " (Leader)" : ""}</div>;
+        return (
+          <div>{successIcon}&nbsp;{
+            isNotHidden(customer.currentCustomer.data.features, "universes.proxyIp") ? (
+              <a href={href} target="_blank" rel="noopener noreferrer">
+                {isMaster ? "Master" : "TServer"}
+              </a>
+            ) : (
+              <span>{isMaster ? "Master" : "TServer"}</span>
+            )
+          }{(isMaster && row.isMasterLeader) ? " (Leader)" : ""}</div>
+        );
       } else {
         return <div>{row.isLoading ? loadingIcon : warningIcon}&nbsp;{isMaster ? "Master" : "TServer"}</div>;
       }
@@ -47,21 +58,23 @@ export default class NodeDetailsTable extends Component {
     };
 
     const getNodeNameLink = (cell, row) => {
+      const ip = (
+        <div className={"text-lightgray"}>
+          {row['privateIP']}
+        </div>
+      );
+      let nodeName = cell;
       if (row.cloudInfo.cloud === "aws") {
         const awsURI = `https://${row.cloudInfo.region}.console.aws.amazon.com/ec2/v2/home?region=${row.cloudInfo.region}#Instances:search=${cell};sort=availabilityZone`;
-        return (<Fragment>
-          <a href={awsURI} target="_blank" rel="noopener noreferrer">{cell}</a>
-          <div className={"text-lightgray"}>{row['privateIP']}</div>
-        </Fragment>);
+        nodeName = (<a href={awsURI} target="_blank" rel="noopener noreferrer">{cell}</a>);
       } else if (row.cloudInfo.cloud === "gcp") {
         const gcpURI = `https://console.cloud.google.com/compute/instancesDetail/zones/${row.azItem}/instances/${cell}`;
-        return (<Fragment>
-          <a href={gcpURI} target="_blank" rel="noopener noreferrer">{cell}</a>
-          <div>{row['privateIP']}</div>
-        </Fragment>);
-      } else {
-        return cell;
+        nodeName = (<a href={gcpURI} target="_blank" rel="noopener noreferrer">{cell}</a>);
       }
+      return (<Fragment>
+        {nodeName}
+        {ip}
+      </Fragment>);
     };
 
     const getStatusUptime = (cell, row) => {
@@ -96,7 +109,20 @@ export default class NodeDetailsTable extends Component {
     };
 
     const getNodeAction = function(cell, row, type) {
-      return <NodeAction currentRow={row} providerUUID={providerUUID} />;
+      const hideIP = !isNotHidden(customer.currentCustomer.data.features,
+                                  "universes.proxyIp");
+      const actions_disabled = isDisabled(customer.currentCustomer.data.features,
+                                          "universes.actions");
+
+      if (hideIP) {
+        const index = row.allowedActions.indexOf('CONNECT');
+        if (index > -1) {
+          row.allowedActions.splice(index, 1);
+        }
+      }
+      return (<NodeAction currentRow={row} providerUUID={providerUUID}
+                         disableConnect={hideIP}
+                         disabled={actions_disabled} />);
     };
 
     const formatFloatValue = function(cell, row) {

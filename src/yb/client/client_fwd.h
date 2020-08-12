@@ -31,6 +31,9 @@ class scoped_refptr;
 namespace yb {
 namespace client {
 
+class RejectionScoreSource;
+typedef std::shared_ptr<RejectionScoreSource> RejectionScoreSourcePtr;
+
 class YBClient;
 
 class YBError;
@@ -79,8 +82,9 @@ struct YBTableInfo;
 
 typedef std::function<void(std::vector<const TabletId*>*)> LocalTabletFilter;
 
-YB_STRONGLY_TYPED_BOOL(UseCache);
 YB_STRONGLY_TYPED_BOOL(ForceConsistentRead);
+YB_STRONGLY_TYPED_BOOL(Initial);
+YB_STRONGLY_TYPED_BOOL(UseCache);
 
 namespace internal {
 
@@ -109,6 +113,7 @@ typedef std::function<void(const Result<internal::RemoteTabletPtr>&)> LookupTabl
 typedef std::function<void(const Result<CDCStreamId>&)> CreateCDCStreamCallback;
 
 class AsyncClientInitialiser;
+
 } // namespace client
 } // namespace yb
 

@@ -1,12 +1,9 @@
-#!/usr/bin/env python2
+#!/usr/bin/env python3
 
 """
 Build a dependency graph of sources, object files, libraries, and binaries.  Compute the set of
 tests that might be affected by changes to the given set of source files.
 """
-
-from __future__ import print_function
-from six import iteritems
 
 import argparse
 import fnmatch
@@ -19,7 +16,10 @@ import sys
 import unittest
 import pipes
 import platform
+
 from datetime import datetime
+
+from typing import Optional, List, Dict
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -51,7 +51,8 @@ def get_relative_path_or_none(abs_path, relative_to):
         return abs_path[len(relative_to):]
 
 
-SOURCE_FILE_EXTENSIONS = make_extensions(['c', 'cc', 'cpp', 'cxx', 'h', 'hpp', 'hxx', 'proto'])
+SOURCE_FILE_EXTENSIONS = make_extensions(['c', 'cc', 'cpp', 'cxx', 'h', 'hpp', 'hxx', 'proto',
+                                          'l', 'y'])
 LIBRARY_FILE_EXTENSIONS_NO_DOT = ['so', 'dylib']
 LIBRARY_FILE_EXTENSIONS = make_extensions(LIBRARY_FILE_EXTENSIONS_NO_DOT)
 TEST_FILE_SUFFIXES = ['_test', '-test', '_itest', '-itest']
@@ -64,7 +65,7 @@ PROTO_OUTPUT_FILE_NAME_RE = re.compile(r'^([a-zA-Z_0-9-]+)[.]pb[.](h|cc)$')
 
 # Ignore some special-case CMake targets that do not have a one-to-one match with executables or
 # libraries.
-IGNORED_CMAKE_TARGETS = ['gen_version_info', 'latest_symlink', 'gen_proto', 'postgres']
+IGNORED_CMAKE_TARGETS = ['gen_version_info', 'latest_symlink', 'postgres']
 
 LIST_DEPS_CMD = 'deps'
 LIST_REVERSE_DEPS_CMD = 'rev-deps'
@@ -90,7 +91,7 @@ NODE_TYPE_ANY = 'any'
 # If that changes, this needs to be updated. Note that the "bin" directory here is the
 # yugabyte/bin directory in the source tree, not the "bin" directory under the build
 # directory, so it only has scripts and not yb-master / yb-tserver binaries.
-DIRECTORIES_DONT_AFFECT_TESTS = [
+DIRECTORIES_THAT_DO_NOT_AFFECT_TESTS = [
     'architecture',
     'bin',
     'cloud',
@@ -425,16 +426,16 @@ class CMakeDepGraph:
     def __init__(self, build_root):
         self.build_root = build_root
         self.cmake_targets = None
+        self.cmake_deps_path = os.path.join(self.build_root, 'yb_cmake_deps.txt')
         self.cmake_deps = None
         self._load()
 
     def _load(self):
-        cmake_deps_path = os.path.join(self.build_root, 'yb_cmake_deps.txt')
         logging.info("Loading dependencies between CMake targets from '{}'".format(
-            cmake_deps_path))
+            self.cmake_deps_path))
         self.cmake_deps = {}
         self.cmake_targets = set()
-        with open(cmake_deps_path) as cmake_deps_file:
+        with open(self.cmake_deps_path) as cmake_deps_file:
             for line in cmake_deps_file:
                 line = line.strip()
                 if not line:
@@ -454,11 +455,11 @@ class CMakeDepGraph:
                         continue
                     cmake_dep_set.add(cmake_dep)
 
-        for cmake_target, cmake_target_deps in iteritems(self.cmake_deps):
+        for cmake_target, cmake_target_deps in self.cmake_deps.items():
             adding_targets = [cmake_target] + list(cmake_target_deps)
             self.cmake_targets.update(set(adding_targets))
         logging.info("Found {} CMake targets in '{}'".format(
-            len(self.cmake_targets), cmake_deps_path))
+            len(self.cmake_targets), self.cmake_deps_path))
 
     def _get_cmake_dep_set_of(self, target):
         """
@@ -466,7 +467,7 @@ class CMakeDepGraph:
         this set modifies this CMake dependency graph.
         """
         deps = self.cmake_deps.get(target)
-        if not deps:
+        if deps is None:
             deps = set()
             self.cmake_deps[target] = deps
             self.cmake_targets.add(target)
@@ -549,6 +550,27 @@ class DependencyGraphBuilder:
                                 os.path.join(root, file_name),
                                 source_str=source_str)
 
+    def find_flex_bison_files(self):
+        """
+        CMake commands generally include the C file compilation, but misses the case where flex
+        or bison generates those files, somewhat similiar to .proto files.
+        Only examining src/yb tree.
+        """
+        src_yb_root = os.path.join(self.conf.src_dir_path, 'yb')
+        logging.info("Finding .y and .l files in the source tree at '%s'", src_yb_root)
+        source_str = 'flex and bison files in {}'.format(src_yb_root)
+        for root, dirs, files in os.walk(src_yb_root):
+            for file_name in files:
+                if file_name.endswith('.y') or file_name.endswith('.l'):
+                    rel_path = os.path.relpath(root, self.conf.yb_src_root)
+                    assert not rel_path.startswith('../')
+                    dependent_file = os.path.join(self.conf.build_root,
+                                                  rel_path,
+                                                  file_name[:len(file_name)] + '.cc')
+                    self.register_dependency(dependent_file,
+                                             os.path.join(root, file_name),
+                                             source_str)
+
     def match_cmake_targets_with_files(self):
         logging.info("Matching CMake targets with the files found")
         self.cmake_target_to_nodes = {}
@@ -582,7 +604,7 @@ class DependencyGraphBuilder:
 
         # We're not adding nodes into our graph for CMake targets. Instead, we're finding files
         # that correspond to CMake targets, and add dependencies to those files.
-        for cmake_target, cmake_target_deps in iteritems(cmake_dep_graph.cmake_deps):
+        for cmake_target, cmake_target_deps in cmake_dep_graph.cmake_deps.items():
             if cmake_target in unmatched_cmake_targets:
                 continue
             node = self.cmake_target_to_node[cmake_target]
@@ -692,7 +714,7 @@ class DependencyGraphBuilder:
         if is_abs_path(rel_path):
             return self.find_node(rel_path, must_exist=True)
         candidates = []
-        for path, node in iteritems(self.node_by_path):
+        for path, node in self.node_by_path.items():
             if path.endswith('/' + rel_path):
                 candidates.append(node)
         if not candidates:
@@ -767,7 +789,8 @@ class DependencyGraphBuilder:
 
     def build(self):
         compile_commands_path = os.path.join(self.conf.build_root, 'compile_commands.json')
-        if not os.path.exists(compile_commands_path):
+        cmake_deps_path = os.path.join(self.conf.build_root, 'yb_cmake_deps.txt')
+        if not os.path.exists(compile_commands_path) or not os.path.exists(cmake_deps_path):
 
             # This is mostly useful during testing. We don't want to generate the list of compile
             # commands by default because it takes a while, so only generate it on demand.
@@ -793,6 +816,7 @@ class DependencyGraphBuilder:
         else:
             self.parse_link_and_depend_files_for_make()
         self.find_proto_files()
+        self.find_flex_bison_files()
         self.dep_graph.validate_node_existence()
 
         self.load_cmake_deps()
@@ -824,7 +848,7 @@ class DependencyGraph:
         cmake_dep_graph = CMakeDepGraph(self.conf.build_root)
         for node in self.get_nodes():
             proto_lib = node.get_containing_proto_lib()
-            if proto_lib:
+            if proto_lib and self.conf.verbose:
                 logging.info("node: %s, proto lib: %s", node, proto_lib)
 
         self.cmake_dep_graph = cmake_dep_graph
@@ -867,7 +891,7 @@ class DependencyGraph:
             node_id = node_json['id']
             id_to_node[node_id] = self.find_or_create_node(node_json['path'])
             id_to_dep_ids[node_id] = node_json['deps']
-        for node_id, dep_ids in iteritems(id_to_dep_ids):
+        for node_id, dep_ids in id_to_dep_ids.items():
             node = id_to_node[node_id]
             for dep_id in dep_ids:
                 node.add_dependency(id_to_node[dep_id])
@@ -939,7 +963,7 @@ class DependencyGraph:
                 return node_id
 
             is_first = True
-            for node_path, node in iteritems(self.node_by_path):
+            for node_path, node in self.node_by_path.items():
                 node_json = dict(
                     id=get_node_id(node),
                     path=node_path,
@@ -1076,6 +1100,8 @@ class DependencyGraph:
         corresponding protobuf library target.
         """
 
+        logging.info("Validating dependencies on protobuf-generated headers")
+
         # TODO: only do this during graph generation.
         self._add_proto_generation_deps()
         self._check_for_circular_dependencies()
@@ -1092,6 +1118,9 @@ class DependencyGraph:
         #
         # However, we also need to get the CMake target name corresponding to the binary
         # containing the .cc.o file.
+
+        proto_dep_errors = []
+
         for node in self.get_nodes():
             if not node.path.endswith('.pb.cc.o'):
                 continue
@@ -1113,12 +1142,18 @@ class DependencyGraph:
                         recursive_cmake_deps = self.get_cmake_dep_graph().get_recursive_cmake_deps(
                             binary_cmake_target)
                         if proto_gen_target not in recursive_cmake_deps:
-                            raise RuntimeError(
+                            proto_dep_errors.append(
                                 "CMake target %s does not depend directly or indirectly on target "
                                 "%s but uses the header file %s. Recursive cmake deps of %s: %s" %
                                 (binary_cmake_target, proto_gen_target, pb_h_path,
                                  binary_cmake_target, recursive_cmake_deps)
                             )
+        if proto_dep_errors:
+            for error_msg in proto_dep_errors:
+                logging.error("Protobuf dependency error: %s", error_msg)
+            raise RuntimeError(
+                "Found targets that use protobuf-generated header files but do not declare the "
+                "dependency explicitly. See the log messages above.")
 
 
 class DependencyGraphTest(unittest.TestCase):
@@ -1194,6 +1229,14 @@ class DependencyGraphTest(unittest.TestCase):
                 'yb-bulk_load.cc.o'
             ], 'yb-bulk_load.cc')
 
+    def test_flex_bison(self):
+        self.assert_affected_by([
+                'scanner_lex.l.cc'
+            ], 'scanner_lex.l')
+        self.assert_affected_by([
+                'parser_gram.y.cc'
+            ], 'parser_gram.y')
+
     def test_proto_deps_validity(self):
         self.dep_graph.validate_proto_deps()
 
@@ -1220,11 +1263,12 @@ def get_file_category(rel_path):
     """
     basename = os.path.basename(rel_path)
 
-    if rel_path.split(os.sep)[0] in DIRECTORIES_DONT_AFFECT_TESTS:
+    if rel_path.split(os.sep)[0] in DIRECTORIES_THAT_DO_NOT_AFFECT_TESTS:
         return CATEGORY_DOES_NOT_AFFECT_TESTS
 
     if rel_path == 'yb_build.sh':
-        # The main build script is being run anyway.
+        # The main build script is being run anyway, so we hope that most issues will come out at
+        # that stage.
         return CATEGORY_DOES_NOT_AFFECT_TESTS
 
     if basename == 'CMakeLists.txt' or basename.endswith('.cmake'):
@@ -1351,13 +1395,13 @@ def main():
     # Figure out the initial set of targets based on a git commit, a regex, etc.
     # ---------------------------------------------------------------------------------------------
 
-    updated_categories = None
+    updated_categories = set()
     file_changes = []
     if args.git_diff:
         old_working_dir = os.getcwd()
         with WorkDirContext(conf.yb_src_root):
             git_diff_output = subprocess.check_output(
-                    ['git', 'diff', args.git_diff, '--name-only'])
+                    ['git', 'diff', args.git_diff, '--name-only']).decode('utf-8')
 
             initial_nodes = set()
             file_paths = set()
@@ -1375,24 +1419,27 @@ def main():
                     initial_nodes.add(node)
 
         if not initial_nodes:
-            logging.warning("Did not find any graph nodes for this set of files: {}".format(
-                file_paths))
+            logging.warning("Did not find any graph nodes for this set of files: %s", file_paths)
             for basename in set([os.path.basename(file_path) for file_path in file_paths]):
                 logging.warning("Nodes for basename '{}': {}".format(
                     basename, dep_graph.find_nodes_by_basename(basename)))
 
-        file_changes_by_category = group_by(file_changes, get_file_category)
-        for category, changes in file_changes_by_category.items():
-            logging.info("File changes in category '{}':".format(category))
-            for change in sorted(changes):
-                logging.info("    {}".format(change))
-        updated_categories = set(file_changes_by_category.keys())
-
     elif conf.file_regex:
         logging.info("Using file name regex: {}".format(conf.file_regex))
         initial_nodes = dep_graph.find_nodes_by_regex(conf.file_regex)
+        if not initial_nodes:
+            logging.warning("Did not find any graph nodes for this pattern: %s", conf.file_regex)
+        for node in initial_nodes:
+            file_changes.append(node.path)
     else:
         raise RuntimeError("Could not figure out how to generate the initial set of files")
+
+    file_changes_by_category = group_by(file_changes, get_file_category)
+    for category, changes in file_changes_by_category.items():
+        logging.info("File changes in category '%s':", category)
+        for change in sorted(changes):
+            logging.info("    %s", change)
+    updated_categories = set(file_changes_by_category.keys())
 
     results = set()
     if cmd == LIST_AFFECTED_CMD:
@@ -1421,7 +1468,12 @@ def main():
         # than C++ / Java / files known not to affect unit tests, we force re-running all tests.
         unsafe_categories = updated_categories - CATEGORIES_NOT_CAUSING_RERUN_OF_ALL_TESTS
         user_said_all_tests = get_bool_env_var('YB_RUN_ALL_TESTS')
-        run_all_tests = bool(unsafe_categories) or user_said_all_tests
+
+        test_filter_re = os.getenv('YB_TEST_EXECUTION_FILTER_RE')
+        manual_test_filtering_with_regex = bool(test_filter_re)
+
+        select_all_tests_for_now = (
+            bool(unsafe_categories) or user_said_all_tests or manual_test_filtering_with_regex)
 
         user_said_all_cpp_tests = get_bool_env_var('YB_RUN_ALL_CPP_TESTS')
         user_said_all_java_tests = get_bool_env_var('YB_RUN_ALL_JAVA_TESTS')
@@ -1429,15 +1481,19 @@ def main():
         java_files_changed = 'java' in updated_categories
         yb_master_or_tserver_changed = bool(affected_basenames & set(['yb-master', 'yb-tserver']))
 
-        run_cpp_tests = run_all_tests or cpp_files_changed or user_said_all_cpp_tests
-        run_java_tests = (
-                run_all_tests or java_files_changed or yb_master_or_tserver_changed or
-                user_said_all_java_tests
-            )
+        run_cpp_tests = select_all_tests_for_now or cpp_files_changed or user_said_all_cpp_tests
 
-        if run_all_tests:
+        run_java_tests = (
+            select_all_tests_for_now or java_files_changed or yb_master_or_tserver_changed or
+            user_said_all_java_tests)
+
+        if select_all_tests_for_now:
             if user_said_all_tests:
                 logging.info("User explicitly specified that all tests should be run")
+            elif manual_test_filtering_with_regex:
+                logging.info(
+                    "YB_TEST_EXECUTION_FILTER_RE specified: %s, will filter tests at a later step",
+                    test_filter_re)
             else:
                 logging.info(
                     "All tests should be run based on file changes in these categories: {}".format(
@@ -1458,7 +1514,7 @@ def main():
                                      (['yb-{master,tserver} binaries changed']
                                       if yb_master_or_tserver_changed else [])))
 
-        if run_cpp_tests and not test_basename_list and not run_all_tests:
+        if run_cpp_tests and not test_basename_list and not select_all_tests_for_now:
             logging.info('There are no C++ test programs affected by the changes, '
                          'will skip running C++ tests.')
             run_cpp_tests = False
@@ -1468,7 +1524,12 @@ def main():
             run_java_tests=run_java_tests,
             file_changes_by_category=file_changes_by_category
         )
-        if not run_all_tests:
+        if test_filter_re:
+            test_conf.update(test_filter_re=test_filter_re)
+
+        if not select_all_tests_for_now:
+            # We only have this kind of fine-grained filtering for C++ test programs, and for Java
+            # tests we either run all of them or none.
             test_conf['cpp_test_programs'] = test_basename_list
             logging.info(
                     "{} C++ test programs should be run (out of {} possible, {}%)".format(

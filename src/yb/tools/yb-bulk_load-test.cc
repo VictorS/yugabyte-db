@@ -22,9 +22,10 @@
 #include "yb/client/table_handle.h"
 #include "yb/common/hybrid_time.h"
 #include "yb/common/jsonb.h"
-#include "yb/common/partition.h"
+#include "yb/common/ql_value.h"
 #include "yb/common/wire_protocol.h"
 #include "yb/docdb/docdb_test_util.h"
+#include "yb/common/partition.h"
 #include "yb/docdb/ql_rocksdb_storage.h"
 #include "yb/integration-tests/mini_cluster.h"
 #include "yb/integration-tests/yb_mini_cluster_test_base.h"
@@ -117,7 +118,7 @@ class YBBulkLoadTest : public YBMiniClusterTestBase<MiniCluster> {
     ASSERT_OK(client_->CreateNamespace(kNamespace));
 
     // Create the table.
-    table_name_.reset(new YBTableName(kNamespace, kTableName));
+    table_name_.reset(new YBTableName(YQL_DATABASE_CQL, kNamespace, kTableName));
     std::unique_ptr<YBTableCreator> table_creator(client_->NewTableCreator());
     ASSERT_OK(table_creator->table_name(*table_name_.get())
           .table_type(client::YBTableType::YQL_TABLE_TYPE)

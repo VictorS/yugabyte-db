@@ -22,6 +22,7 @@
 #include <cds/container/basket_queue.h>
 #include <cds/gc/dhp.h>
 
+#include "yb/util/debug-util.h"
 #include "yb/util/scope_exit.h"
 #include "yb/util/thread.h"
 
@@ -52,14 +53,19 @@ const std::string kRpcThreadCategory = "rpc_thread_pool";
 
 class Worker {
  public:
-  explicit Worker(ThreadPoolShare* share, size_t index)
+  explicit Worker(ThreadPoolShare* share)
       : share_(share) {
+  }
+
+  CHECKED_STATUS Start(size_t index) {
     auto name = strings::Substitute("rpc_tp_$0_$1", share_->options.name, index);
-    CHECK_OK(yb::Thread::Create(kRpcThreadCategory, name, &Worker::Execute, this, &thread_));
+    return yb::Thread::Create(kRpcThreadCategory, name, &Worker::Execute, this, &thread_);
   }
 
   ~Worker() {
-    thread_->Join();
+    if (thread_) {
+      thread_->Join();
+    }
   }
 
   Worker(const Worker& worker) = delete;
@@ -162,10 +168,8 @@ class ThreadPool::Impl {
         queue_full_status_(STATUS_SUBSTITUTE(ServiceUnavailable,
                                              "Queue is full, max items: $0",
                                              share_.options.queue_limit)) {
+    LOG(INFO) << "Starting thread pool " << share_.options.ToString();
     workers_.reserve(share_.options.max_workers);
-    while (workers_.size() != share_.options.max_workers) {
-      workers_.emplace_back(nullptr);
-    }
   }
 
   const ThreadPoolOptions& options() const {
@@ -181,13 +185,14 @@ class ThreadPool::Impl {
     }
     bool added = share_.task_queue.push(task);
     DCHECK(added); // BasketQueue always succeed.
-    --adding_;
     Worker* worker = nullptr;
     while (share_.waiting_workers.pop(worker)) {
       if (worker->Notify()) {
+        --adding_;
         return true;
       }
     }
+    --adding_;
 
     // We increment created_workers_ every time, the first max_worker increments would produce
     // a new worker. And after that, we will just increment it doing nothing after that.
@@ -196,7 +201,15 @@ class ThreadPool::Impl {
     if (index < share_.options.max_workers) {
       std::lock_guard<std::mutex> lock(mutex_);
       if (!closing_) {
-        workers_[index].reset(new Worker(&share_, index));
+        auto new_worker = std::make_unique<Worker>(&share_);
+        auto status = new_worker->Start(workers_.size());
+        if (status.ok()) {
+          workers_.push_back(std::move(new_worker));
+        } else if (workers_.empty()) {
+          LOG(FATAL) << "Unable to start first worker: " << status;
+        } else {
+          LOG(WARNING) << "Unable to start worker: " << status;
+        }
       }
     } else {
       --created_workers_;
@@ -206,7 +219,7 @@ class ThreadPool::Impl {
 
   void Shutdown() {
     // Block creating new workers.
-    created_workers_ += workers_.size();
+    created_workers_ += share_.options.max_workers;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (closing_) {
@@ -221,13 +234,13 @@ class ThreadPool::Impl {
         worker->Stop();
       }
     }
-    workers_.clear();
     // Shutdown is quite rare situation otherwise enqueue is quite frequent.
     // Because of this we use "atomic lock" in enqueue and busy wait in shutdown.
     // So we could process enqueue quickly, and stuck in shutdown for sometime.
-    while(adding_ != 0) {
+    while (adding_ != 0) {
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
+    workers_.clear();
     ThreadPoolTask* task = nullptr;
     while (share_.task_queue.pop(task)) {
       task->Done(shutdown_status_);
@@ -253,10 +266,10 @@ ThreadPool::ThreadPool(ThreadPoolOptions options)
     : impl_(new Impl(std::move(options))) {
 }
 
-ThreadPool::ThreadPool(ThreadPool&& rhs)
+ThreadPool::ThreadPool(ThreadPool&& rhs) noexcept
     : impl_(std::move(rhs.impl_)) {}
 
-ThreadPool& ThreadPool::operator=(ThreadPool&& rhs) {
+ThreadPool& ThreadPool::operator=(ThreadPool&& rhs) noexcept {
   impl_->Shutdown();
   impl_ = std::move(rhs.impl_);
   return *this;

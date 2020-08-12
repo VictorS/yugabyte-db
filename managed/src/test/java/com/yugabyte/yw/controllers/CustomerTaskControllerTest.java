@@ -8,12 +8,14 @@ import com.google.common.collect.ImmutableList;
 import com.yugabyte.yw.commissioner.Commissioner;
 import com.yugabyte.yw.commissioner.UserTaskDetails;
 import com.yugabyte.yw.common.FakeApiHelper;
+import com.yugabyte.yw.common.FakeDBApplication;
 import com.yugabyte.yw.common.ModelFactory;
 import com.yugabyte.yw.models.Customer;
 import com.yugabyte.yw.models.CustomerTask;
 
 import com.yugabyte.yw.models.TaskInfo;
 import com.yugabyte.yw.models.Universe;
+import com.yugabyte.yw.models.Users;
 import com.yugabyte.yw.models.helpers.TaskType;
 import org.junit.Before;
 import org.junit.Test;
@@ -31,6 +33,7 @@ import java.util.concurrent.TimeUnit;
 
 import static com.yugabyte.yw.common.AssertHelper.assertValue;
 import static com.yugabyte.yw.common.AssertHelper.assertValues;
+import static com.yugabyte.yw.common.AssertHelper.assertAuditEntry;
 import static com.yugabyte.yw.common.ModelFactory.createUniverse;
 import static com.yugabyte.yw.models.CustomerTask.TaskType.Create;
 import static com.yugabyte.yw.models.CustomerTask.TaskType.Update;
@@ -48,29 +51,21 @@ import static play.test.Helpers.contentAsString;
 import static play.test.Helpers.fakeRequest;
 import static play.test.Helpers.route;
 
-public class CustomerTaskControllerTest extends WithApplication {
+public class CustomerTaskControllerTest extends FakeDBApplication {
   private Customer customer;
+  private Users user;
   private Universe universe;
-  private Commissioner mockCommissioner;
-
-  @Override
-  protected Application provideApplication() {
-    mockCommissioner = mock(Commissioner.class);
-    return new GuiceApplicationBuilder()
-      .configure((Map) Helpers.inMemoryDatabase())
-      .overrides(bind(Commissioner.class).toInstance(mockCommissioner))
-      .build();
-  }
 
   @Before
   public void setUp() {
     customer = ModelFactory.testCustomer();
+    user = ModelFactory.testUser(customer);
     universe = createUniverse(customer.getCustomerId());
   }
 
   @Test
   public void testTaskHistoryEmptyList() {
-    String authToken = customer.createAuthToken();
+    String authToken = user.createAuthToken();
     Result result = route(fakeRequest("GET", "/api/customers/" + customer.uuid + "/tasks")
                             .header("X-AUTH-TOKEN", authToken));
 
@@ -79,6 +74,7 @@ public class CustomerTaskControllerTest extends WithApplication {
     JsonNode json = Json.parse(contentAsString(result));
     assertTrue(json.isObject());
     assertEquals(0, json.size());
+    assertAuditEntry(0, customer.uuid);
   }
 
   private UUID createTaskWithStatus(UUID targetUUID, CustomerTask.TargetType targetType,
@@ -154,7 +150,7 @@ public class CustomerTaskControllerTest extends WithApplication {
 
   @Test
   public void testFetchTaskWithFailedSubtasks() {
-    String authToken = customer.createAuthToken();
+    String authToken = user.createAuthToken();
     UUID universeUUID = UUID.randomUUID();
     UUID taskUUID = createTaskWithStatus(universeUUID, CustomerTask.TargetType.Universe, Create,
         "Foo", "Failure", 50.0);
@@ -178,11 +174,12 @@ public class CustomerTaskControllerTest extends WithApplication {
     assertThat(task.get("subTaskGroupType").asText(), allOf(notNullValue(),
         equalTo(UserTaskDetails.SubTaskGroupType.ConfigureUniverse.name())));
     assertThat(task.get("creationTime").asText(), is(notNullValue()));
+    assertAuditEntry(0, customer.uuid);
   }
 
   @Test
   public void testTaskHistoryList() {
-    String authToken = customer.createAuthToken();
+    String authToken = user.createAuthToken();
     UUID universeUUID = UUID.randomUUID();
     UUID taskUUID = createTaskWithStatus(universeUUID, CustomerTask.TargetType.Universe,
         Create, "Foo", "Running", 50.0);
@@ -217,11 +214,12 @@ public class CustomerTaskControllerTest extends WithApplication {
     assertEquals(2, providerTasks.size());
     assertValues(providerTasks, "id", ImmutableList.of(providerTaskUUID1.toString(),
         providerTaskUUID2.toString()));
+    assertAuditEntry(0, customer.uuid);
   }
 
   @Test
   public void testTaskCompletionTime() {
-    String authToken = customer.createAuthToken();
+    String authToken = user.createAuthToken();
     UUID taskUUID = createTaskWithStatus(universe.universeUUID, CustomerTask.TargetType.Universe,
         Create, "Foo", "Success", 100.0);
 
@@ -230,6 +228,7 @@ public class CustomerTaskControllerTest extends WithApplication {
       String url = "/api/customers/" + customer.uuid + "/tasks";
       Result result = FakeApiHelper.doRequestWithAuthToken("GET", url, authToken);
       assertEquals(OK, result.status());
+      assertAuditEntry(0, customer.uuid);
       JsonNode tasksJson = Json.parse(contentAsString(result));
       JsonNode universeTasks = tasksJson.get(universe.universeUUID.toString());
       if (idx == 0) {
@@ -247,7 +246,7 @@ public class CustomerTaskControllerTest extends WithApplication {
 
   @Test
   public void testTaskHistoryUniverseList() {
-    String authToken = customer.createAuthToken();
+    String authToken = user.createAuthToken();
     Universe universe1 = createUniverse("Universe 2", customer.getCustomerId());
 
     UUID taskUUID1 = createTaskWithStatus(universe.universeUUID, CustomerTask.TargetType.Universe,
@@ -263,11 +262,12 @@ public class CustomerTaskControllerTest extends WithApplication {
     assertTrue(universeTasks.isArray());
     assertEquals(1, universeTasks.size());
     assertValues(universeTasks, "id", ImmutableList.of(taskUUID1.toString()));
+    assertAuditEntry(0, customer.uuid);
   }
 
   @Test
   public void testTaskHistoryProgressCompletes() {
-    String authToken = customer.createAuthToken();
+    String authToken = user.createAuthToken();
     UUID taskUUID = createTaskWithStatus(universe.universeUUID, CustomerTask.TargetType.Universe,
         Create, "Foo", "Success", 100.0);
     Result result = FakeApiHelper.doRequestWithAuthToken("GET", "/api/customers/" +
@@ -277,11 +277,12 @@ public class CustomerTaskControllerTest extends WithApplication {
     assertThat(contentAsString(result), allOf(notNullValue(),
         containsString("Created Universe : Foo")));
     assertTrue(ct.getCreateTime().before(ct.getCompletionTime()));
+    assertAuditEntry(0, customer.uuid);
   }
 
   @Test
   public void testTaskStatusWithValidUUID() {
-    String authToken = customer.createAuthToken();
+    String authToken = user.createAuthToken();
     ObjectNode responseJson = Json.newObject();
     UUID taskUUID = createTaskWithStatusAndResponse(universe.universeUUID,
         CustomerTask.TargetType.Universe, Create, "Foo", "Success", 100.0, responseJson);
@@ -308,11 +309,12 @@ public class CustomerTaskControllerTest extends WithApplication {
         equalTo("Configuring the universe")));
     assertThat(taskDetailsJson.get(0).get("state").asText(), allOf(notNullValue(),
         equalTo("Success")));
+    assertAuditEntry(0, customer.uuid);
   }
 
   @Test
   public void testTaskStatusWithInvalidTaskUUID() {
-    String authToken = customer.createAuthToken();
+    String authToken = user.createAuthToken();
     UUID taskUUID = UUID.randomUUID();
 
     Result result = FakeApiHelper.doRequestWithAuthToken("GET", "/api/customers/" +
@@ -322,11 +324,12 @@ public class CustomerTaskControllerTest extends WithApplication {
     JsonNode json = Json.parse(contentAsString(result));
     assertThat(json.get("error").asText(), allOf(notNullValue(),
         equalTo("Invalid Customer Task UUID: " + taskUUID)));
+    assertAuditEntry(0, customer.uuid);
   }
 
   @Test
   public void testTaskStatusWithInvalidCustomerUUID() {
-    String authToken = customer.createAuthToken();
+    String authToken = user.createAuthToken();
     UUID taskUUID = UUID.randomUUID();
     UUID customerUUID = UUID.randomUUID();
     Result result = FakeApiHelper.doRequestWithAuthToken("GET", "/api/customers/" +
@@ -336,6 +339,7 @@ public class CustomerTaskControllerTest extends WithApplication {
 
     String resultString = contentAsString(result);
     assertThat(resultString, allOf(notNullValue(),
-        equalTo("Unable To Authenticate Customer")));
+        equalTo("Unable To Authenticate User")));
+    assertAuditEntry(0, customer.uuid);
   }
 }

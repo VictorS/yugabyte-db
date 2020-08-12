@@ -38,6 +38,15 @@ DEFINE_int32(rpcz_max_cql_query_dump_size, 4_KB,
              "The maximum size of the CQL query string in the RPCZ dump.");
 DEFINE_int32(rpcz_max_cql_batch_dump_count, 4_KB,
              "The maximum number of CQL batch elements in the RPCZ dump.");
+DEFINE_bool(throttle_cql_calls_on_soft_memory_limit, true,
+            "Whether to reject CQL calls when soft memory limit is reached.");
+
+constexpr int kDropPolicy = 1;
+constexpr int kRejectPolicy = 0;
+
+DEFINE_int32(throttle_cql_calls_policy, kRejectPolicy,
+              "Policy for throttling CQL calls. 1 - drop throttled calls. "
+              "0 - respond with OVERLOADED error.");
 
 DECLARE_int32(rpc_max_message_size);
 
@@ -49,6 +58,11 @@ DECLARE_int32(rpc_max_message_size);
 DEFINE_int32(max_message_length, 254_MB,
              "The maximum message length of the cql message.");
 
+// By default the CQL server sends CQL EVENTs (opcode=0x0c) only if the connection was
+// subscribed (via REGISTER request) for particular events. The flag allows to send all
+// available event always - even if the connection was not subscribed for events.
+DEFINE_bool(cql_server_always_send_events, false,
+            "All CQL connections automatically subscribed for all CQL events.");
 
 namespace yb {
 namespace cqlserver {
@@ -62,12 +76,18 @@ CQLConnectionContext::CQLConnectionContext(
               this),
       read_buffer_(receive_buffer_size, buffer_tracker),
       call_tracker_(call_tracker) {
+  VLOG(1) << "CQL Connection Context: FLAGS_cql_server_always_send_events = " <<
+      FLAGS_cql_server_always_send_events;
+
+  if (FLAGS_cql_server_always_send_events) {
+    registered_events_ = CQLMessage::kAllEvents;
+  }
 }
 
 Result<rpc::ProcessDataResult> CQLConnectionContext::ProcessCalls(
     const rpc::ConnectionPtr& connection, const IoVecs& data,
     rpc::ReadBufferFull read_buffer_full) {
-  return parser_.Parse(connection, data, read_buffer_full);
+  return parser_.Parse(connection, data, read_buffer_full, nullptr /* tracker_for_throttle */);
 }
 
 Status CQLConnectionContext::HandleCall(
@@ -82,6 +102,18 @@ Status CQLConnectionContext::HandleCall(
   if (!s.ok()) {
     LOG(WARNING) << connection->ToString() << ": received bad data: " << s.ToString();
     return STATUS_SUBSTITUTE(NetworkError, "Bad data: $0", s.ToUserMessage());
+  }
+
+  if (FLAGS_throttle_cql_calls_on_soft_memory_limit) {
+    if (!CheckMemoryPressureWithLogging(call_tracker_, /* score= */ 0.0, "Rejecting CQL call: ")) {
+      if (FLAGS_throttle_cql_calls_policy != kDropPolicy) {
+        static Status status = STATUS(ServiceUnavailable, "Server is under memory pressure");
+        // We did not store call yet, so should not notify that it was processed.
+        call->ResetCallProcessedListener();
+        call->RespondFailure(rpc::ErrorStatusPB::ERROR_SERVER_TOO_BUSY, Status::OK());
+      } // Otherwise silently drop the call without queueing it. Clients will get a timeout.
+      return Status::OK();
+    }
   }
 
   s = Store(call.get());
@@ -156,7 +188,13 @@ void CQLInboundCall::RespondFailure(rpc::ErrorStatusPB::RpcErrorCodePB error_cod
   switch (error_code) {
     case rpc::ErrorStatusPB::ERROR_SERVER_TOO_BUSY: {
       // Return OVERLOADED error to redirect CQL client to the next host.
-      ErrorResponse(stream_id_, ErrorResponse::Code::OVERLOADED, "CQL service queue full")
+      ErrorResponse(stream_id_, ErrorResponse::Code::OVERLOADED, status.message().ToBuffer())
+          .Serialize(compression_scheme, &msg);
+      break;
+    }
+    case rpc::ErrorStatusPB::FATAL_SERVER_SHUTTING_DOWN: {
+      // Return OVERLOADED error to redirect CQL client to the next host.
+      ErrorResponse(stream_id_, ErrorResponse::Code::OVERLOADED, "CQL shutting down")
           .Serialize(compression_scheme, &msg);
       break;
     }
@@ -164,7 +202,6 @@ void CQLInboundCall::RespondFailure(rpc::ErrorStatusPB::RpcErrorCodePB error_cod
     case rpc::ErrorStatusPB::ERROR_NO_SUCH_METHOD: FALLTHROUGH_INTENDED;
     case rpc::ErrorStatusPB::ERROR_NO_SUCH_SERVICE: FALLTHROUGH_INTENDED;
     case rpc::ErrorStatusPB::ERROR_INVALID_REQUEST: FALLTHROUGH_INTENDED;
-    case rpc::ErrorStatusPB::FATAL_SERVER_SHUTTING_DOWN: FALLTHROUGH_INTENDED;
     case rpc::ErrorStatusPB::FATAL_DESERIALIZING_REQUEST: FALLTHROUGH_INTENDED;
     case rpc::ErrorStatusPB::FATAL_VERSION_MISMATCH: FALLTHROUGH_INTENDED;
     case rpc::ErrorStatusPB::FATAL_UNAUTHORIZED: FALLTHROUGH_INTENDED;
@@ -283,8 +320,8 @@ bool CQLInboundCall::DumpPB(const rpc::DumpRunningRpcsRequestPB& req,
   if (req.include_traces() && trace_) {
     resp->set_trace_buffer(trace_->DumpToString(true));
   }
-  resp->set_micros_elapsed(
-      MonoTime::Now().GetDeltaSince(timing_.time_received).ToMicroseconds());
+  resp->set_elapsed_millis(
+      MonoTime::Now().GetDeltaSince(timing_.time_received).ToMilliseconds());
   GetCallDetails(resp);
 
   return true;

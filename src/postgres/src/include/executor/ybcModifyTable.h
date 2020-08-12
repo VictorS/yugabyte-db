@@ -57,9 +57,10 @@ extern Oid YBCExecuteNonTxnInsert(Relation rel,
  * Insert a tuple into the an index's backing YugaByte index table.
  */
 extern void YBCExecuteInsertIndex(Relation rel,
-                                  Datum *values,
-                                  bool *isnull,
-                                  Datum ybctid);
+								  Datum *values,
+								  bool *isnull,
+								  Datum ybctid,
+								  bool is_backfill);
 
 /*
  * Delete a tuple (identified by ybctid) from a YugaByte table.
@@ -90,7 +91,21 @@ extern bool YBCExecuteUpdate(Relation rel,
 							 TupleTableSlot *slot,
 							 HeapTuple tuple,
 							 EState *estate,
-							 ModifyTableState *mtstate);
+							 ModifyTableState *mtstate,
+							 Bitmapset *updatedCols);
+
+/*
+ * Replace a row in a YugaByte table by first deleting an existing row
+ * (identified by ybctid) and then inserting a tuple to replace it.
+ * This allows us to update a row primary key.
+ *
+ * This will change ybctid of a row within a tuple.
+ */
+extern Oid YBCExecuteUpdateReplace(Relation rel,
+								   TupleTableSlot *slot,
+								   HeapTuple tuple,
+								   EState *estate,
+								   ModifyTableState *mtstate);
 
 //------------------------------------------------------------------------------
 // System tables modify-table API.
@@ -103,10 +118,6 @@ extern void YBCDeleteSysCatalogTuple(Relation rel, HeapTuple tuple);
 extern void YBCUpdateSysCatalogTuple(Relation rel,
 									 HeapTuple oldtuple,
 									 HeapTuple tuple);
-
-// Buffer write operations.
-extern void YBCStartBufferingWriteOperations();
-extern void YBCFlushBufferedWriteOperations();
 
 //------------------------------------------------------------------------------
 // Utility methods.

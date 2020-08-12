@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "yb/common/ql_bfunc.h"
+#include "yb/common/ql_value.h"
 
 using std::endl;
 using std::make_pair;
@@ -149,7 +150,7 @@ void SubDocument::MoveFrom(SubDocument* other) {
     // The internal state of the other subdocument is now owned by this one.
 #ifndef NDEBUG
     // Another layer of protection against trying to use the old state in debug mode.
-    memset(other, 0xab, sizeof(SubDocument));  // Fill with a random value.
+    memset(static_cast<void*>(other), 0xab, sizeof(SubDocument));  // Fill with a random value.
 #endif
     other->type_ = ValueType::kNullLow;  // To avoid deallocation of the old object's memory.
   }
@@ -422,6 +423,8 @@ void SubDocument::ToQLValuePB(const SubDocument& doc,
       const shared_ptr<QLType>& keys_type = ql_type->params()[0];
       const shared_ptr<QLType>& values_type = ql_type->params()[1];
       QLMapValuePB *value_pb = ql_value->mutable_map_value();
+      value_pb->clear_keys();
+      value_pb->clear_values();
       for (auto &pair : doc.object_container()) {
         QLValuePB *key = value_pb->add_keys();
         PrimitiveValue::ToQLValuePB(pair.first, keys_type, key);
@@ -433,6 +436,7 @@ void SubDocument::ToQLValuePB(const SubDocument& doc,
     case SET: {
       const shared_ptr<QLType>& elems_type = ql_type->params()[0];
       QLSeqValuePB *value_pb = ql_value->mutable_set_value();
+      value_pb->clear_elems();
       for (auto &pair : doc.object_container()) {
         QLValuePB *elem = value_pb->add_elems();
         PrimitiveValue::ToQLValuePB(pair.first, elems_type, elem);
@@ -443,6 +447,7 @@ void SubDocument::ToQLValuePB(const SubDocument& doc,
     case LIST: {
       const shared_ptr<QLType>& elems_type = ql_type->params()[0];
       QLSeqValuePB *value_pb = ql_value->mutable_list_value();
+      value_pb->clear_elems();
       for (auto &pair : doc.object_container()) {
         // list elems are represented as subdocument values with keys only used for ordering
         QLValuePB *elem = value_pb->add_elems();
@@ -453,6 +458,8 @@ void SubDocument::ToQLValuePB(const SubDocument& doc,
     case USER_DEFINED_TYPE: {
       const shared_ptr<QLType>& keys_type = QLType::Create(INT16);
       QLMapValuePB *value_pb = ql_value->mutable_map_value();
+      value_pb->clear_keys();
+      value_pb->clear_values();
       for (auto &pair : doc.object_container()) {
         QLValuePB *key = value_pb->add_keys();
         PrimitiveValue::ToQLValuePB(pair.first, keys_type, key);

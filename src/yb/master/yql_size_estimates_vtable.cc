@@ -14,6 +14,11 @@
 #include "yb/master/catalog_manager.h"
 #include "yb/master/yql_size_estimates_vtable.h"
 
+#include "yb/rpc/messenger.h"
+
+#include "yb/util/net/dns_resolver.h"
+#include "yb/util/yb_partition.h"
+
 namespace yb {
 namespace master {
 
@@ -21,15 +26,12 @@ YQLSizeEstimatesVTable::YQLSizeEstimatesVTable(const Master* const master)
     : YQLVirtualTable(master::kSystemSizeEstimatesTableName, master, CreateSchema()) {
 }
 
-Status YQLSizeEstimatesVTable::RetrieveData(const QLReadRequestPB& request,
-                                      std::unique_ptr<QLRowBlock>* vtable) const {
-  vtable->reset(new QLRowBlock(schema_));
+Result<std::shared_ptr<QLRowBlock>> YQLSizeEstimatesVTable::RetrieveData(
+    const QLReadRequestPB& request) const {
+  auto vtable = std::make_shared<QLRowBlock>(schema_);
   std::vector<scoped_refptr<TableInfo> > tables;
   CatalogManager* catalog_manager = master_->catalog_manager();
   catalog_manager->GetAllTables(&tables, true);
-
-  InetAddress remote_endpoint;
-  RETURN_NOT_OK(remote_endpoint.FromString(request.remote_endpoint().host()));
 
   for (scoped_refptr<TableInfo> table : tables) {
     Schema schema;
@@ -57,7 +59,7 @@ Status YQLSizeEstimatesVTable::RetrieveData(const QLReadRequestPB& request,
         continue;
       }
 
-      QLRow &row = (*vtable)->Extend();
+      QLRow &row = vtable->Extend();
       RETURN_NOT_OK(SetColumnValue(kKeyspaceName, nsInfo->name(), &row));
       RETURN_NOT_OK(SetColumnValue(kTableName, table->name(), &row));
 
@@ -83,7 +85,7 @@ Status YQLSizeEstimatesVTable::RetrieveData(const QLReadRequestPB& request,
     }
   }
 
-  return Status::OK();
+  return vtable;
 }
 
 Schema YQLSizeEstimatesVTable::CreateSchema() const {

@@ -32,12 +32,15 @@
 
 #include "yb/consensus/log-test-base.h"
 
+#include "yb/common/ql_value.h"
+
 #include "yb/gutil/strings/escaping.h"
 #include "yb/gutil/strings/substitute.h"
 
 #include "yb/master/master.pb.h"
 
 #include "yb/rpc/messenger.h"
+#include "yb/rpc/rpc_test_util.h"
 #include "yb/rpc/yb_rpc.h"
 
 #include "yb/server/hybrid_clock.h"
@@ -607,7 +610,7 @@ TEST_F(TabletServerTest, TestDeleteTablet) {
   EasyCurl c;
   faststring buf;
   ASSERT_OK(c.FetchURL(strings::Substitute("http://$0/jsonmetricz",
-                                           ToString(mini_server_->bound_http_addr())),
+                                           AsString(mini_server_->bound_http_addr())),
                                            &buf));
 
   // Verify that after restarting the TS, the tablet is still not in the tablet manager.
@@ -728,7 +731,7 @@ TEST_F(TabletServerTest, TestRpcServerCreateDestroy) {
   }
   {
     MessengerBuilder mb("foo");
-    auto messenger = CreateAutoShutdownMessengerHolder(ASSERT_RESULT(mb.Build()));
+    auto messenger = rpc::CreateAutoShutdownMessengerHolder(ASSERT_RESULT(mb.Build()));
     {
       server::RpcServer server2(
           "server2", opts, rpc::CreateConnectionContextFactory<rpc::YBInboundConnectionContext>());

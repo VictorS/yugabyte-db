@@ -136,7 +136,8 @@ class TabletServer : public server::RpcAndWebServerBase, public TabletServerIf {
 
   CHECKED_STATUS PopulateLiveTServers(const master::TSHeartbeatResponsePB& heartbeat_resp);
 
-  CHECKED_STATUS GetLiveTServers(std::vector<master::TSInformationPB> *live_tservers) const {
+  CHECKED_STATUS GetLiveTServers(
+      std::vector<master::TSInformationPB> *live_tservers) const {
     std::lock_guard<simple_spinlock> l(lock_);
     *live_tservers = live_tservers_;
     return Status::OK();
@@ -144,6 +145,8 @@ class TabletServer : public server::RpcAndWebServerBase, public TabletServerIf {
 
   CHECKED_STATUS GetTabletStatus(const GetTabletStatusRequestPB* req,
                                  GetTabletStatusResponsePB* resp) const override;
+
+  bool LeaderAndReady(const TabletId& tablet_id, bool allow_stale = false) const override;
 
   const std::string& permanent_uuid() const { return fs_manager_->uuid(); }
 
@@ -190,12 +193,22 @@ class TabletServer : public server::RpcAndWebServerBase, public TabletServerIf {
     return std::numeric_limits<int32_t>::max();
   }
 
+  client::TransactionPool* TransactionPool() override;
+
+  client::YBClient* client() override;
+
+  const std::string& LogPrefix() const {
+    return log_prefix_;
+  }
+
+  const HostPort pgsql_proxy_bind_address() const { return pgsql_proxy_bind_address_; }
+
  protected:
   virtual CHECKED_STATUS RegisterServices();
 
   friend class TabletServerTestBase;
 
-  void DisplayRpcIcons(std::stringstream* output) override;
+  CHECKED_STATUS DisplayRpcIcons(std::stringstream* output) override;
 
   CHECKED_STATUS ValidateMasterAddressResolution() const;
 
@@ -214,7 +227,7 @@ class TabletServer : public server::RpcAndWebServerBase, public TabletServerIf {
   yb::AtomicUniquePtr<rpc::Publisher> publish_service_ptr_;
 
   // Thread responsible for heartbeating to the master.
-  gscoped_ptr<Heartbeater> heartbeater_;
+  std::unique_ptr<Heartbeater> heartbeater_;
 
   // Thread responsible for collecting metrics snapshots for native storage.
   gscoped_ptr<MetricsSnapshotter> metrics_snapshotter_;
@@ -252,7 +265,17 @@ class TabletServer : public server::RpcAndWebServerBase, public TabletServerIf {
   void AutoInitServiceFlags();
 
   // Shared memory owned by the tablet server.
-  TServerSharedMemory shared_memory_;
+  TServerSharedObject shared_object_;
+
+  std::atomic<client::TransactionPool*> transaction_pool_{nullptr};
+  std::mutex transaction_pool_mutex_;
+  std::unique_ptr<client::TransactionManager> transaction_manager_holder_;
+  std::unique_ptr<client::TransactionPool> transaction_pool_holder_;
+
+  std::string log_prefix_;
+
+  // Bind address of postgres proxy under this tserver.
+  HostPort pgsql_proxy_bind_address_;
 
   DISALLOW_COPY_AND_ASSIGN(TabletServer);
 };

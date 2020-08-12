@@ -1,7 +1,8 @@
 ---
-title: DELETE
-summary: Deletes rows from a table.
-description: DELETE
+title: DELETE statement [YCQL]
+headerTitle: DELETE
+linkTitle: DELETE
+description: Use the DELETE statement to remove rows from a specified table that meet a given condition. 
 menu:
   latest:
     parent: api-cassandra
@@ -15,7 +16,7 @@ showAsideToc: true
 
 ## Synopsis
 
-The `DELETE` statement removes rows from a specified table that meet a given condition. Currently, YugabyteDB can deletes one row at a time. Deleting multiple rows is not yet supported.
+Use the `DELETE` statement to remove rows from a specified table that meet a given condition. Currently, YugabyteDB can deletes one row at a time. Deleting multiple rows is not yet supported.
 
 ## Syntax
 
@@ -42,7 +43,7 @@ Where
 
 - An error is raised if the specified `table_name` does not exist.
 - The `where_expression` and `if_expression` must evaluate to [boolean](../type_bool) values.
-- The `USING TIMESTAMP` clause indicates we would like to perform the DELETE as if it was done at the
+- The `USING TIMESTAMP` clause indicates you would like to perform the DELETE as if it was done at the
   timestamp provided by the user. The timestamp is the number of microseconds since epoch.
 - **NOTE**: You should either use the `USING TIMESTAMP` clause in all of your statements or none of
    them. Using a mix of statements where some have `USING TIMESTAMP` and others do not will lead to
@@ -59,39 +60,39 @@ Where
 - The `if_expression` can only apply to non-key columns (regular columns).
 - The `if_expression` can contain any logical and boolean operators.
 - Deleting only some column values from a row is not yet supported.
-- `IF EXISTS` and `IF NOT EXISTS` options are mostly for symmetry with the [`INSERT`](../dml_insert) and [`UPDATE`](dml_update) statements
+- `IF EXISTS` and `IF NOT EXISTS` options are mostly for symmetry with the [`INSERT`](../dml_insert) and [`UPDATE`](../dml_update) commands.
   - `IF EXISTS` works like a normal delete but additionally returns whether the delete was applied (a row was found with that primary key).
   - `IF NOT EXISTS` is effectively a no-op since rows that do not exist cannot be deleted (but returns whether no row was found with that primary key).
 
 ### `USING` Clause
 
- - `timestamp_expression` must be an integer value (or a bind variable marker for prepared statements).
+The `timestamp_expression` must be an integer value (or a bind variable marker for prepared statements).
 
 ## Examples
 
 ### Delete a row from a table
 
 ```sql
-cqlsh:example> CREATE TABLE employees(department_id INT, 
+ycqlsh:example> CREATE TABLE employees(department_id INT, 
                                       employee_id INT, 
                                       name TEXT, 
                                       PRIMARY KEY(department_id, employee_id));
 ```
 
 ```sql
-cqlsh:example> INSERT INTO employees(department_id, employee_id, name) VALUES (1, 1, 'John');
+ycqlsh:example> INSERT INTO employees(department_id, employee_id, name) VALUES (1, 1, 'John');
 ```
 
 ```sql
-cqlsh:example> INSERT INTO employees(department_id, employee_id, name) VALUES (1, 2, 'Jane');
+ycqlsh:example> INSERT INTO employees(department_id, employee_id, name) VALUES (1, 2, 'Jane');
 ```
 
 ```sql
-cqlsh:example> INSERT INTO employees(department_id, employee_id, name) VALUES (2, 1, 'Joe');
+ycqlsh:example> INSERT INTO employees(department_id, employee_id, name) VALUES (2, 1, 'Joe');
 ```
 
 ```sql
-cqlsh:example> SELECT * FROM employees;
+ycqlsh:example> SELECT * FROM employees;
 ```
 
 ```
@@ -103,17 +104,19 @@ cqlsh:example> SELECT * FROM employees;
 ```
 
 Delete statements identify rows by the primary key columns.
+
 ```sql
-cqlsh:example> DELETE FROM employees WHERE department_id = 1 AND employee_id = 1;
+ycqlsh:example> DELETE FROM employees WHERE department_id = 1 AND employee_id = 1;
 ```
 
 Deletes on non-existent rows are no-ops.
+
 ```sql
-cqlsh:example> DELETE FROM employees WHERE department_id = 3 AND employee_id = 1;
+ycqlsh:example> DELETE FROM employees WHERE department_id = 3 AND employee_id = 1;
 ```
 
 ```sql
-cqlsh:example> SELECT * FROM employees;
+ycqlsh:example> SELECT * FROM employees;
 ```
 
 ```
@@ -128,7 +131,7 @@ cqlsh:example> SELECT * FROM employees;
 'IF' clause conditions will return whether they were applied or not.
 
 ```sql
-cqlsh:example> DELETE FROM employees WHERE department_id = 2 AND employee_id = 1 IF name = 'Joe';
+ycqlsh:example> DELETE FROM employees WHERE department_id = 2 AND employee_id = 1 IF name = 'Joe';
 ```
 
 ```
@@ -138,7 +141,7 @@ cqlsh:example> DELETE FROM employees WHERE department_id = 2 AND employee_id = 1
 ```
 
 ```sql
-cqlsh:example> DELETE FROM employees WHERE department_id = 3 AND employee_id = 1 IF EXISTS;
+ycqlsh:example> DELETE FROM employees WHERE department_id = 3 AND employee_id = 1 IF EXISTS;
 ```
 
 ```
@@ -148,7 +151,7 @@ cqlsh:example> DELETE FROM employees WHERE department_id = 3 AND employee_id = 1
 ```
 
 ```sql
-cqlsh:example> SELECT * FROM employees;
+ycqlsh:example> SELECT * FROM employees;
 ```
 
 ```
@@ -160,19 +163,19 @@ cqlsh:example> SELECT * FROM employees;
 ### Delete several rows with the same partition key
 
 ```sql
-cqlsh:example> INSERT INTO employees(department_id, employee_id, name) VALUES (1, 1, 'John');
+ycqlsh:example> INSERT INTO employees(department_id, employee_id, name) VALUES (1, 1, 'John');
 ```
 
 ```sql
-cqlsh:example> INSERT INTO employees(department_id, employee_id, name) VALUES (2, 1, 'Joe');
+ycqlsh:example> INSERT INTO employees(department_id, employee_id, name) VALUES (2, 1, 'Joe');
 ```
 
 ```sql
-cqlsh:example> INSERT INTO employees(department_id, employee_id, name) VALUES (2, 2, 'Jack');
+ycqlsh:example> INSERT INTO employees(department_id, employee_id, name) VALUES (2, 2, 'Jack');
 ```
 
 ```sql
-cqlsh:example> SELECT * FROM employees;
+ycqlsh:example> SELECT * FROM employees;
 ```
 
 ```
@@ -187,11 +190,11 @@ cqlsh:example> SELECT * FROM employees;
 Delete all entries for a partition key.
 
 ```sql
-cqlsh:example> DELETE FROM employees WHERE department_id = 1;
+ycqlsh:example> DELETE FROM employees WHERE department_id = 1;
 ```
 
 ```sql
-cqlsh:example> SELECT * FROM employees;
+ycqlsh:example> SELECT * FROM employees;
 ```
 
 ```
@@ -200,14 +203,15 @@ cqlsh:example> SELECT * FROM employees;
              2 |           1 |  Joe
              2 |           2 | Jack
 ```
+
 Delete a range of entries within a partition key.
 
 ```sql
-cqlsh:example> DELETE FROM employees WHERE department_id = 2 AND employee_id >= 2 AND employee_id < 4;
+ycqlsh:example> DELETE FROM employees WHERE department_id = 2 AND employee_id >= 2 AND employee_id < 4;
 ```
 
 ```sql
-cqlsh:example> SELECT * FROM employees;
+ycqlsh:example> SELECT * FROM employees;
 ```
 
 ```
@@ -221,11 +225,11 @@ cqlsh:example> SELECT * FROM employees;
 You can do this as shown below.
 
 ```sql
-cqlsh:foo> INSERT INTO employees(department_id, employee_id, name) VALUES (4, 4, 'Ted') USING TIMESTAMP 1000;
+ycqlsh:foo> INSERT INTO employees(department_id, employee_id, name) VALUES (4, 4, 'Ted') USING TIMESTAMP 1000;
 ```
 
 ```sql
-cqlsh:foo> SELECT * FROM employees;
+ycqlsh:foo> SELECT * FROM employees;
 ```
 
 ```
@@ -238,12 +242,13 @@ cqlsh:foo> SELECT * FROM employees;
 ```
 
 ```sql
-cqlsh:foo> DELETE FROM employees USING TIMESTAMP 500 WHERE department_id = 4 AND employee_id = 4; 
+ycqlsh:foo> DELETE FROM employees USING TIMESTAMP 500 WHERE department_id = 4 AND employee_id = 4;
 ```
+
 Not applied since timestamp is lower than 1000
 
 ```sql
-cqlsh:foo> SELECT * FROM employees;
+ycqlsh:foo> SELECT * FROM employees;
 ```
 
 ```
@@ -256,12 +261,13 @@ cqlsh:foo> SELECT * FROM employees;
 ```
 
 ```sql
-cqlsh:foo> DELETE FROM employees USING TIMESTAMP 1500 WHERE department_id = 4 AND employee_id = 4; 
+ycqlsh:foo> DELETE FROM employees USING TIMESTAMP 1500 WHERE department_id = 4 AND employee_id = 4;
 ```
+
 Applied since timestamp is higher than 1000.
 
 ```sql
-cqlsh:foo> SELECT * FROM employees;
+ycqlsh:foo> SELECT * FROM employees;
 ```
 
 ```
@@ -274,10 +280,9 @@ cqlsh:foo> SELECT * FROM employees;
 
 ## See also
 
-[`CREATE TABLE`](../ddl_create_table)
-[`INSERT`](../dml_insert)
-[`SELECT`](../dml_select)
-[`UPDATE`](../dml_update)
-[`TRUNCATE`](../dml_truncate)
-[`Expression`](..#expressions)
-[Other CQL Statements](..)
+- [`CREATE TABLE`](../ddl_create_table)
+- [`INSERT`](../dml_insert)
+- [`SELECT`](../dml_select)
+- [`UPDATE`](../dml_update)
+- [`TRUNCATE`](../dml_truncate)
+- [`Expression`](..#expressions)

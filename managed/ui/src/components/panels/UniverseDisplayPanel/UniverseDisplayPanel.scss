@@ -1,10 +1,10 @@
 /* Copyright (c) YugaByte, Inc. */
 
-@import "_style/colors.scss";
-@import "_style/mixins.scss";
+@import "../../../_style/colors.scss";
+@import "../../../_style/mixins.scss";
 
 
-.universe-display-item-container {
+.universe-display-item-container, .schedule-display-item-container {
   height: 178px;
   margin-bottom: 24px;
   padding: 12px 14px;
@@ -25,7 +25,7 @@
     box-shadow: 0 0.12em 2px rgba($YB_DARK_GRAY_2, 0.05), 0 0.5em 10px rgba($YB_DARK_GRAY_2, 0.07);
   }
 
-  * {
+  & > *:not(.dropdown-menu) {
     position: relative;
     z-index: 1;
   }
@@ -39,7 +39,7 @@
   }
 
   .display-name {
-    font-weight: 600;
+    font-weight: 500;
     font-size: 18px;
     line-height: 120%;
     white-space: nowrap;
@@ -62,6 +62,7 @@
     position: absolute;
     top: 1px;
     right: 12px;
+    z-index: 1000;
   }
 
   .description-item-list {
@@ -84,7 +85,7 @@
     color: #545454;
     padding-top: 0;
     font-size: 14px;
-    font-weight: 600;
+    font-weight: 500;
   }
 
   .config-price-subscript {
@@ -92,8 +93,7 @@
   }
 }
 
-
-a:hover >  .universe-display-item-container, .create-universe-button:hover {
+a:hover > .universe-display-item-container, a:hover > .schedule-display-item-container, .create-universe-button:hover {
   &:before {
     @include transition(0.3s);
     transform: scale(1.03, 1.03);
@@ -308,7 +308,7 @@ a:hover >  .universe-display-item-container, .create-universe-button:hover {
   }
 
   .yb-data-name {
-    font-family: Montserrat, sans-serif;
+    font-family: Rubik, sans-serif;
     font-size: 30px;
     font-weight: 500;
     letter-spacing: -.02em;
@@ -328,5 +328,5 @@ a:hover >  .universe-display-item-container, .create-universe-button:hover {
 
 .universe-create-date {
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 500;
 }

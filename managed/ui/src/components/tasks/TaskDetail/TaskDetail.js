@@ -3,7 +3,7 @@
 import React, { Component } from 'react';
 import PropTypes from 'prop-types';
 import { Link, withRouter, browserHistory } from 'react-router';
-import {isNonEmptyString, isNonEmptyArray, isNonEmptyObject} from 'utils/ObjectUtils';
+import {isNonEmptyString, isNonEmptyArray, isNonEmptyObject} from '../../../utils/ObjectUtils';
 import './TaskDetail.scss';
 import { StepProgressBar } from '../../common/indicators';
 import { YBResourceCount } from '../../common/descriptors';
@@ -29,8 +29,8 @@ class TaskDetail extends Component {
     this.setState({errorStringDisplay: !this.state.errorStringDisplay});
   };
 
-  componentWillMount() {
-    const {params} = this.props;
+  componentDidMount() {
+    const { params } = this.props;
     const currentTaskUUID = params.taskUUID;
     if (isNonEmptyString(currentTaskUUID)) {
       this.props.fetchCurrentTaskDetail(currentTaskUUID);
@@ -38,7 +38,7 @@ class TaskDetail extends Component {
     }
   }
   render() {
-    const {tasks: {failedTasks, taskProgressData}} = this.props;
+    const { tasks: { failedTasks, taskProgressData }} = this.props;
     const self = this;
     const currentTaskData = taskProgressData.data;
     const formatDateField = function(cell) {

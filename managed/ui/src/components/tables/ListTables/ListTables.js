@@ -5,8 +5,10 @@ import { Link } from 'react-router';
 import { Image, ProgressBar, ButtonGroup, DropdownButton } from 'react-bootstrap';
 import tableIcon from '../images/table.png';
 import './ListTables.scss';
-import { isNonEmptyArray } from 'utils/ObjectUtils';
+import { isNonEmptyArray } from '../../../utils/ObjectUtils';
 import { TableAction } from '../../tables';
+
+import { UniverseAction } from '../../universes';
 import { YBPanelItem } from '../../panels';
 import { BootstrapTable, TableHeaderColumn } from 'react-bootstrap-table';
 import 'react-bootstrap-table/css/react-bootstrap-table.css';
@@ -17,6 +19,8 @@ import { isDisabled } from '../../../utils/LayoutUtils';
 
 class TableTitle extends Component {
   render() {
+    const { customer: { currentCustomer } } = this.props;
+    const currentUniverse = this.props.universe.currentUniverse.data;
     const {numCassandraTables, numRedisTables, numPostgresTables} = this.props;
     return (
       <div className="table-container-title clearfix">
@@ -33,6 +37,14 @@ class TableTitle extends Component {
           <div className="table-type-count">
             <Image src={tableIcon} className="table-type-logo"/>
             <YBResourceCount kind="YEDIS" size={numRedisTables}/>
+          </div>
+        </div>
+        <div className="pull-right">
+          <div className="backup-action-btn-group">
+            <UniverseAction className="table-action" universe={currentUniverse}
+              actionType="toggle-backup" btnClass={"btn-orange"}
+              disabled={isDisabled(currentCustomer.data.features, "universes.tableActions")}
+            />
           </div>
         </div>
       </div>
@@ -74,7 +86,8 @@ export default class ListTables extends Component {
           header={
             <TableTitle numRedisTables={numRedisTables}
                         numCassandraTables={numCassandraTables}
-                        numPostgresTables={numPostgresTables}/>
+                        numPostgresTables={numPostgresTables}
+                        {...this.props} />
           }
           body={
             <ListTableGrid {...this.props}/>
@@ -115,25 +128,27 @@ class ListTableGrid extends Component {
     };
     const actions_disabled = isDisabled(currentCustomer.data.features, "universes.tableActions");
     const formatActionButtons = function(item, row, disabled) {
-      const actions = [
-        <TableAction key={`${row.tableName}-backup-btn`} currentRow={row} actionType="create-backup"
-                    disabled={actions_disabled} />
-      ];
-      if (row.tableType !== "REDIS_TABLE_TYPE") {
-        actions.push([
-          <TableAction key={`${row.tableName}-import-btn`} currentRow={row} actionType="import"
-                      disabled={actions_disabled} />,
-          <TableAction key={`${row.tableName}-drop-btn`} currentRow={row}
-                      actionType="drop" disabled={actions_disabled} />
-        ]);
+      if (!row.isIndexTable) {
+        const actions = [
+          <TableAction key={`${row.tableName}-backup-btn`} currentRow={row}
+                      actionType="create-backup"
+                      disabled={actions_disabled} btnClass={"btn-orange"}/>
+        ];
+        if (getTableIcon(row.tableType) === "YCQL") {
+          actions.push([
+            <TableAction key={`${row.tableName}-import-btn`} currentRow={row} actionType="import"
+                        disabled={actions_disabled} />
+          ]);
+        }
+        return (
+          <ButtonGroup>
+            <DropdownButton className="btn btn-default" title="Actions" id="bg-nested-dropdown"
+                        pullRight>
+              {actions}
+            </DropdownButton>
+          </ButtonGroup>
+        );
       }
-      return (
-        <ButtonGroup>
-          <DropdownButton className="btn btn-default" title="Actions" id="bg-nested-dropdown" pullRight>
-            {actions}
-          </DropdownButton>
-        </ButtonGroup>
-      );
     };
 
     const tablePlacementDummyData = {"read": "-", "write": "-"};
@@ -164,7 +179,8 @@ class ListTableGrid extends Component {
           "tableName": item.tableName,
           "status": "success",
           "read": tablePlacementDummyData.read,
-          "write": tablePlacementDummyData.write
+          "write": tablePlacementDummyData.write,
+          "isIndexTable": item.isIndexTable
         };
       });
     }

@@ -25,7 +25,8 @@ export default class YBModalForm extends Component {
           onSubmit={(values, actions) => {
             this.props.onFormSubmit(values, actions);
           }}
-          render={props => (
+        >
+          {props => (
             <form name={formName} onSubmit={props.handleSubmit}>
               <Modal.Header closeButton>
                 <Modal.Title>{title}</Modal.Title>
@@ -40,7 +41,7 @@ export default class YBModalForm extends Component {
               {(footerAccessory || showCancelButton || onFormSubmit) &&
                 <Modal.Footer>
                   <div className={footerButtonClass}>
-                    <YBButton btnClass="btn btn-orange pull-right" loading={props.isSubmitting}
+                    <YBButton btnClass={`btn btn-orange pull-right ${props.isSubmitting ? ' btn-is-loading' : ''}`} loading={props.isSubmitting}
                       btnText={submitLabel} btnType="submit" disabled={props.isSubmitting} />
                     {showCancelButton && <YBButton btnClass="btn" btnText={cancelLabel} onClick={onHide} />}
                     {footerAccessory && <div className="pull-left modal-accessory">{footerAccessory}</div>}
@@ -49,7 +50,7 @@ export default class YBModalForm extends Component {
               }
             </form>
           )}
-        />
+        </Formik>
       </Modal>
     );
   }

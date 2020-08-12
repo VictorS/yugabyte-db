@@ -76,14 +76,14 @@ static void YBCAddSysCatalogColumn(YBCPgStatement yb_stmt,
 	 */
 	if (key == is_key)
 	{
-		HandleYBStmtStatus(YBCPgCreateTableAddColumn(yb_stmt,
-		                                             attname,
-		                                             attnum,
-		                                             col_type,
-		                                             false /* is_hash */,
-		                                             is_key,
-		                                             false /* is_desc */,
-		                                             false /* is_nulls_first */), yb_stmt);
+		HandleYBStatus(YBCPgCreateTableAddColumn(yb_stmt,
+																						 attname,
+																						 attnum,
+																						 col_type,
+																						 false /* is_hash */,
+																						 is_key,
+																						 false /* is_desc */,
+																						 false /* is_nulls_first */));
 	}
 }
 
@@ -130,15 +130,16 @@ void YBCCreateSysCatalogTable(const char *table_name,
 	char           *schema_name = "pg_catalog";
 	YBCPgStatement yb_stmt      = NULL;
 
-	HandleYBStatus(YBCPgNewCreateTable(ybc_pg_session,
-	                                   db_name,
+	HandleYBStatus(YBCPgNewCreateTable(db_name,
 	                                   schema_name,
 	                                   table_name,
 	                                   TemplateDbOid,
 	                                   table_oid,
 	                                   is_shared_relation,
 	                                   false, /* if_not_exists */
-									   pkey_idx == NULL, /* add_primary_key */
+									   								 pkey_idx == NULL, /* add_primary_key */
+									   								 true, /* colocated */
+									   								 InvalidOid /*tablegroup oid*/,
 	                                   &yb_stmt));
 
 	/* Add all key columns first, then the regular columns */
@@ -148,6 +149,5 @@ void YBCCreateSysCatalogTable(const char *table_name,
 	}
 	YBCAddSysCatalogColumns(yb_stmt, tupdesc, pkey_idx, /* key */ false);
 
-	HandleYBStmtStatus(YBCPgExecCreateTable(yb_stmt), yb_stmt);
-	HandleYBStatus(YBCPgDeleteStatement(yb_stmt));
+	HandleYBStatus(YBCPgExecCreateTable(yb_stmt));
 }

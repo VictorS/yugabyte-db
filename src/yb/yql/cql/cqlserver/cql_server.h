@@ -46,22 +46,20 @@ class CQLServer : public server::RpcAndWebServerBase {
 
   CQLServer(const CQLServerOptions& opts,
             boost::asio::io_service* io,
-            const tserver::TabletServer* tserver,
-            client::LocalTabletFilter local_tablet_filter);
+            tserver::TabletServer* tserver);
 
   CHECKED_STATUS Start();
 
   void Shutdown();
 
-  const tserver::TabletServer* tserver() const { return tserver_; }
+  tserver::TabletServer* tserver() const { return tserver_; }
 
  private:
   CQLServerOptions opts_;
   void CQLNodeListRefresh(const boost::system::error_code &e);
   void RescheduleTimer();
   boost::asio::deadline_timer timer_;
-  const tserver::TabletServer* const tserver_;
-  client::LocalTabletFilter local_tablet_filter_;
+  tserver::TabletServer* const tserver_;
 
   std::unique_ptr<CQLServerEvent> BuildTopologyChangeEvent(const std::string& event_type,
                                                            const Endpoint& addr);

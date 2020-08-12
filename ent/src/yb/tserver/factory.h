@@ -52,7 +52,7 @@ class CQLServerEnt : public cqlserver::CQLServer {
   CHECKED_STATUS SetupMessengerBuilder(rpc::MessengerBuilder* builder) override {
     RETURN_NOT_OK(CQLServer::SetupMessengerBuilder(builder));
     secure_context_ = VERIFY_RESULT(server::SetupSecureContext(
-        options_.rpc_opts.rpc_bind_addresses, fs_manager_.get(),
+        options_.rpc_opts.rpc_bind_addresses, *fs_manager_,
         server::SecureContextType::kClientToServer, builder));
     return Status::OK();
   }
@@ -67,12 +67,9 @@ class Factory {
   }
 
   std::unique_ptr<cqlserver::CQLServer> CreateCQLServer(
-      const cqlserver::CQLServerOptions& options, rpc::IoService* io,
+      const cqlserver::CQLServerOptions& options, IoService* io,
       tserver::TabletServer* tserver) {
-    return std::make_unique<CQLServerEnt>(
-        options, io, tserver,
-        std::bind(&TSTabletManager::PreserveLocalLeadersOnly, tserver->tablet_manager(),
-                  std::placeholders::_1));
+    return std::make_unique<CQLServerEnt>(options, io, tserver);
   }
 };
 

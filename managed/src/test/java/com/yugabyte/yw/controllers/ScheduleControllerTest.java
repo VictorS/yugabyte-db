@@ -15,6 +15,7 @@ import com.yugabyte.yw.models.Customer;
 import com.yugabyte.yw.models.CustomerConfig;
 import com.yugabyte.yw.models.CustomerTask;
 import com.yugabyte.yw.models.Universe;
+import com.yugabyte.yw.models.Users;
 import com.yugabyte.yw.models.helpers.TaskType;
 import org.junit.Before;
 import org.junit.Test;
@@ -29,6 +30,7 @@ import static com.yugabyte.yw.common.AssertHelper.assertOk;
 import static com.yugabyte.yw.common.AssertHelper.assertValue;
 import static com.yugabyte.yw.common.AssertHelper.assertValues;
 import static com.yugabyte.yw.common.AssertHelper.assertBadRequest;
+import static com.yugabyte.yw.common.AssertHelper.assertAuditEntry;
 import static com.yugabyte.yw.models.CustomerTask.TaskType.Restore;
 import static org.junit.Assert.*;
 import static org.mockito.Matchers.any;
@@ -43,11 +45,13 @@ public class ScheduleControllerTest extends FakeDBApplication {
 
   private Universe defaultUniverse;
   private Customer defaultCustomer;
+  private Users defaultUser;
   private Schedule defaultSchedule;
 
   @Before
   public void setUp() {
     defaultCustomer = ModelFactory.testCustomer();
+    defaultUser = ModelFactory.testUser(defaultCustomer);
     defaultUniverse = ModelFactory.createUniverse(defaultCustomer.getCustomerId());
 
     BackupTableParams backupTableParams = new BackupTableParams();
@@ -58,7 +62,7 @@ public class ScheduleControllerTest extends FakeDBApplication {
   }
 
   private Result listSchedules(UUID customerUUID) {
-    String authToken = defaultCustomer.createAuthToken();
+    String authToken = defaultUser.createAuthToken();
     String method = "GET";
     String url = "/api/customers/" + customerUUID + "/schedules";
 
@@ -66,7 +70,7 @@ public class ScheduleControllerTest extends FakeDBApplication {
   }
 
   private Result deleteSchedule(UUID scheduleUUID, UUID customerUUID) {
-    String authToken = defaultCustomer.createAuthToken();
+    String authToken = defaultUser.createAuthToken();
     String method = "DELETE";
     String url = "/api/customers/" + customerUUID + "/schedules/" + scheduleUUID;
 
@@ -80,6 +84,7 @@ public class ScheduleControllerTest extends FakeDBApplication {
     JsonNode resultJson = Json.parse(contentAsString(r));
     assertEquals(1, resultJson.size());
     assertValues(resultJson, "scheduleUUID", ImmutableList.of(defaultSchedule.scheduleUUID.toString()));
+    assertAuditEntry(0, defaultCustomer.uuid);
   }
 
   @Test
@@ -88,7 +93,8 @@ public class ScheduleControllerTest extends FakeDBApplication {
     Result r = listSchedules(invalidCustomerUUID);
     assertEquals(FORBIDDEN, r.status());
     String resultString = contentAsString(r);
-    assertEquals(resultString, "Unable To Authenticate Customer");
+    assertEquals(resultString, "Unable To Authenticate User");
+    assertAuditEntry(0, defaultCustomer.uuid);
   }
 
   @Test 
@@ -99,6 +105,7 @@ public class ScheduleControllerTest extends FakeDBApplication {
     assertOk(r);
     resultJson = Json.parse(contentAsString(listSchedules(defaultCustomer.uuid)));
     assertEquals(0, resultJson.size());
+    assertAuditEntry(1, defaultCustomer.uuid);
   }
 
   @Test 
@@ -109,9 +116,10 @@ public class ScheduleControllerTest extends FakeDBApplication {
     Result r = deleteSchedule(defaultSchedule.scheduleUUID, invalidCustomerUUID);
     assertEquals(FORBIDDEN, r.status());
     String resultString = contentAsString(r);
-    assertEquals(resultString, "Unable To Authenticate Customer");
+    assertEquals(resultString, "Unable To Authenticate User");
     resultJson = Json.parse(contentAsString(listSchedules(defaultCustomer.uuid)));
     assertEquals(1, resultJson.size());
+    assertAuditEntry(0, defaultCustomer.uuid);
   }
 
   @Test 
@@ -123,5 +131,6 @@ public class ScheduleControllerTest extends FakeDBApplication {
     assertBadRequest(r, "Invalid Schedule UUID: " + invalidScheduleUUID);
     resultJson = Json.parse(contentAsString(listSchedules(defaultCustomer.uuid)));
     assertEquals(1, resultJson.size());
+    assertAuditEntry(0, defaultCustomer.uuid);
   }
 }

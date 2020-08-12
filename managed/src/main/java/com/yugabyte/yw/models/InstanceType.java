@@ -29,7 +29,8 @@ import play.libs.Json;
 public class InstanceType extends Model {
   public static final Logger LOG = LoggerFactory.getLogger(InstanceType.class);
 
-  static List<String> AWS_INSTANCE_PREFIXES_SUPPORTED = ImmutableList.of("m3.", "c5.", "c4.", "c3.", "i3.");
+  public static List<String> AWS_INSTANCE_PREFIXES_SUPPORTED = ImmutableList.of(
+    "m3.", "c5.", "c5d.", "c4.", "c3.", "i3.");
 
   public enum VolumeType {
     @EnumValue("EBS")
@@ -41,7 +42,7 @@ public class InstanceType extends Model {
     @EnumValue("HDD")
     HDD,
 
-    @EnumValue("HDD")
+    @EnumValue("NVME")
     NVME
   }
 
@@ -60,8 +61,8 @@ public class InstanceType extends Model {
   public void setActive(Boolean active) { this.active = active; }
 
   @Constraints.Required
-  @Column(nullable = false)
-  public Integer numCores;
+  @Column(nullable = false, columnDefinition = "float")
+  public Double numCores;
 
   @Constraints.Required
   @Column(nullable = false, columnDefinition = "float")
@@ -100,6 +101,14 @@ public class InstanceType extends Model {
   public static InstanceType upsert(String providerCode,
                                     String instanceTypeCode,
                                     Integer numCores,
+                                    Double memSize,
+                                    InstanceTypeDetails instanceTypeDetails) {
+    return upsert(providerCode, instanceTypeCode, (double) numCores, memSize, instanceTypeDetails);
+  }
+
+  public static InstanceType upsert(String providerCode,
+                                    String instanceTypeCode,
+                                    Double numCores,
                                     Double memSize,
                                     InstanceTypeDetails instanceTypeDetails) {
     InstanceType instanceType = InstanceType.get(providerCode, instanceTypeCode);
@@ -198,6 +207,7 @@ public class InstanceType extends Model {
   public static class InstanceTypeDetails {
     public static final int DEFAULT_VOLUME_COUNT = 1;
     public static final int DEFAULT_GCP_VOLUME_SIZE_GB = 375;
+    public static final int DEFAULT_AZU_VOLUME_SIZE_GB = 250;
 
     public List<VolumeDetails> volumeDetailsList;
     public PublicCloudConstants.Tenancy tenancy;
@@ -225,6 +235,13 @@ public class InstanceType extends Model {
     public static InstanceTypeDetails createGCPDefault() {
       InstanceTypeDetails instanceTypeDetails = new InstanceTypeDetails();
       instanceTypeDetails.setVolumeDetailsList(DEFAULT_VOLUME_COUNT, DEFAULT_GCP_VOLUME_SIZE_GB,
+          VolumeType.SSD);
+      return instanceTypeDetails;
+    }
+
+    public static InstanceTypeDetails createAZUDefault() {
+      InstanceTypeDetails instanceTypeDetails = new InstanceTypeDetails();
+      instanceTypeDetails.setVolumeDetailsList(DEFAULT_VOLUME_COUNT, DEFAULT_AZU_VOLUME_SIZE_GB,
           VolumeType.SSD);
       return instanceTypeDetails;
     }

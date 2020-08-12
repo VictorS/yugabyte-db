@@ -13,13 +13,23 @@
 
 #include "yb/docdb/doc_write_batch.h"
 
+#include "yb/docdb/doc_key.h"
+#include "yb/rocksdb/db.h"
+#include "yb/rocksdb/write_batch.h"
+#include "yb/rocksutil/write_batch_formatter.h"
+
+#include "yb/server/hybrid_clock.h"
+
 #include "yb/docdb/doc_ttl_util.h"
 #include "yb/docdb/docdb-internal.h"
 #include "yb/docdb/docdb.pb.h"
 #include "yb/docdb/docdb_rocksdb_util.h"
 #include "yb/docdb/value_type.h"
-#include "yb/rocksdb/db.h"
-#include "yb/server/hybrid_clock.h"
+#include "yb/docdb/kv_debug.h"
+#include "yb/util/bytes_formatter.h"
+#include "yb/util/enums.h"
+
+using yb::BinaryOutputFormat;
 
 using yb::server::HybridClock;
 
@@ -269,18 +279,14 @@ CHECKED_STATUS DocWriteBatch::SetPrimitiveInternal(
 
       DCHECK(!value.has_user_timestamp());
 
-      // The document/subdocument that this subkey is supposed to live in does not exist, create it.
-      KeyBytes parent_key(key_prefix_);
-
       // Add the parent key to key/value batch before appending the encoded HybridTime to it.
       // (We replicate key/value pairs without the HybridTime and only add it before writing to
       // RocksDB.)
-      put_batch_.emplace_back(std::move(*parent_key.mutable_data()),
-                              string(1, ValueTypeAsChar::kObject));
+      put_batch_.emplace_back(key_prefix_.ToStringBuffer(), string(1, ValueTypeAsChar::kObject));
 
       // Update our local cache to record the fact that we're adding this subdocument, so that
       // future operations in this DocWriteBatch don't have to add it or look for it in RocksDB.
-      cache_.Put(KeyBytes(key_prefix_.AsSlice()), hybrid_time, ValueType::kObject);
+      cache_.Put(key_prefix_, hybrid_time, ValueType::kObject);
       subkey.AppendToKey(&key_prefix_);
     }
   }
@@ -290,7 +296,7 @@ CHECKED_STATUS DocWriteBatch::SetPrimitiveInternal(
   RETURN_NOT_OK(should_apply);
   if (should_apply.get()) {
     // The key in the key/value batch does not have an encoded HybridTime.
-    put_batch_.emplace_back(key_prefix_.AsStringRef(), value.Encode());
+    put_batch_.emplace_back(key_prefix_.ToStringBuffer(), value.Encode());
 
     // The key we use in the DocWriteBatchCache does not have a final hybrid_time, because that's
     // the key we expect to look up.
@@ -490,7 +496,7 @@ Status DocWriteBatch::ReplaceInList(
   if (dir == Direction::kForward) {
     // Ensure we seek directly to indices and skip init marker if it exists.
     key_prefix_.AppendValueType(ValueType::kArrayIndex);
-    SeekToKeyPrefix(iter.get(), false);
+    RETURN_NOT_OK(SeekToKeyPrefix(iter.get(), false));
   } else {
     // We would like to seek past the entire list and go backwards.
     key_prefix_.AppendValueType(ValueType::kMaxByte);
@@ -598,6 +604,42 @@ void DocWriteBatch::TEST_CopyToWriteBatchPB(KeyValueWriteBatchPB *kv_pb) const {
     kv_pair->mutable_key()->assign(entry.first);
     kv_pair->mutable_value()->assign(entry.second);
   }
+}
+
+// ------------------------------------------------------------------------------------------------
+// Converting a RocksDB write batch to a string.
+// ------------------------------------------------------------------------------------------------
+
+class DocWriteBatchFormatter : public WriteBatchFormatter {
+ public:
+  DocWriteBatchFormatter(
+      StorageDbType storage_db_type,
+      BinaryOutputFormat binary_output_format)
+      : WriteBatchFormatter(binary_output_format),
+        storage_db_type_(storage_db_type) {}
+ protected:
+  std::string FormatKey(const Slice& key) override {
+    const auto key_result = DocDBKeyToDebugStr(key, storage_db_type_);
+    if (key_result.ok()) {
+      return *key_result;
+    }
+    return Format(
+        "$0 (error: $1)",
+        WriteBatchFormatter::FormatKey(key),
+        key_result.status());
+  }
+
+ private:
+  StorageDbType storage_db_type_;
+};
+
+Result<std::string> WriteBatchToString(
+    const rocksdb::WriteBatch& write_batch,
+    StorageDbType storage_db_type,
+    BinaryOutputFormat binary_output_format) {
+  DocWriteBatchFormatter formatter(storage_db_type, binary_output_format);
+  RETURN_NOT_OK(write_batch.Iterate(&formatter));
+  return formatter.str();
 }
 
 }  // namespace docdb

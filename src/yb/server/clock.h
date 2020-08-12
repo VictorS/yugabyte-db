@@ -36,7 +36,6 @@
 #include <string>
 
 #include "yb/common/clock.h"
-#include "yb/common/common.pb.h"
 #include "yb/common/hybrid_time.h"
 
 #include "yb/gutil/ref_counted.h"
@@ -81,12 +80,13 @@ typedef scoped_refptr<Clock> ClockPtr;
 
 template <class Request>
 void UpdateClock(const Request& request, Clock* clock) {
+  auto propagated_hybrid_time = HybridTime::FromPB(request.propagated_hybrid_time());
   // If the client sent us a hybrid_time, decode it and update the clock so that all future
   // hybrid_times are greater than the passed hybrid_time.
-  if (!request.has_propagated_hybrid_time()) {
+  if (!propagated_hybrid_time) {
     return;
   }
-  clock->Update(HybridTime(request.propagated_hybrid_time()));
+  clock->Update(propagated_hybrid_time);
 }
 
 } // namespace server

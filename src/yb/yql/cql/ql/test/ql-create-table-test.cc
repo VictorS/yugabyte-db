@@ -13,14 +13,16 @@
 //
 //--------------------------------------------------------------------------------------------------
 
+#include <boost/algorithm/string.hpp>
+
 #include "yb/master/catalog_manager.h"
 #include "yb/master/master.h"
 #include "yb/master/master_defaults.h"
 #include "yb/yql/cql/ql/test/ql-test-base.h"
-#include <boost/algorithm/string.hpp>
 
+#include "yb/common/ql_value.h"
 
-DECLARE_int32(simulate_slow_table_create_secs);
+DECLARE_int32(TEST_simulate_slow_table_create_secs);
 DECLARE_bool(master_enable_metrics_snapshotter);
 DECLARE_bool(tserver_enable_metrics_snapshotter);
 DECLARE_int32(metrics_snapshotter_interval_ms);
@@ -163,7 +165,7 @@ TEST_F(TestQLCreateTable, TestQLCreateTableSimple) {
 // sleeping and the table is in a ready state. Without the fix, the INSERT statement always fails
 // with a "Table Not Found" error.
 TEST_F(TestQLCreateTable, TestQLConcurrentCreateTableAndCreateTableIfNotExistsStmts) {
-  FLAGS_simulate_slow_table_create_secs = 10;
+  FLAGS_TEST_simulate_slow_table_create_secs = 10;
   // Init the simulated cluster.
   ASSERT_NO_FATALS(CreateSimulatedCluster());
 
@@ -184,7 +186,7 @@ TEST_F(TestQLCreateTable, TestQLConcurrentCreateTableAndCreateTableIfNotExistsSt
 
   // Before the fix, this would return immediately with Status::OK() without waiting for the table
   // to be ready to serve read/write requests. With the fix, this statement shouldn't return until
-  // the table is ready, which happens after FLAGS_simulate_slow_table_create_secs seconds have
+  // the table is ready, which happens after FLAGS_TEST_simulate_slow_table_create_secs seconds have
   // elapsed.
   s = processor2->Run("CREATE TABLE IF NOT EXISTS k.t(k int PRIMARY KEY);");
   CHECK_OK(s);
@@ -199,7 +201,7 @@ TEST_F(TestQLCreateTable, TestQLConcurrentCreateTableAndCreateTableIfNotExistsSt
 // that whenever a CREATE TABLE statement returns "Duplicate Table. Already present", the table
 // is ready to accept write requests.
 TEST_F(TestQLCreateTable, TestQLConcurrentCreateTableStmt) {
-  FLAGS_simulate_slow_table_create_secs = 10;
+  FLAGS_TEST_simulate_slow_table_create_secs = 10;
   // Init the simulated cluster.
   ASSERT_NO_FATALS(CreateSimulatedCluster());
 

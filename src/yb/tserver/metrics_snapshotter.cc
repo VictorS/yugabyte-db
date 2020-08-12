@@ -312,7 +312,8 @@ Status MetricsSnapshotter::Thread::DoMetricsSnapshot() {
   shared_ptr<YBSession> session = client_->NewSession();
   session->SetTimeout(15s);
 
-  const YBTableName kTableName(master::kSystemNamespaceName, kMetricsSnapshotsTableName);
+  const YBTableName kTableName(
+      YQL_DATABASE_CQL, master::kSystemNamespaceName, kMetricsSnapshotsTableName);
 
   client::TableHandle table;
   RETURN_NOT_OK(table.Open(kTableName, client_));
@@ -320,13 +321,19 @@ Status MetricsSnapshotter::Thread::DoMetricsSnapshot() {
   NMSWriter::EntityMetricsMap table_metrics;
   NMSWriter::MetricsMap server_metrics;
   NMSWriter nmswriter{&table_metrics, &server_metrics};
-  WARN_NOT_OK(server_->metric_registry()->WriteForPrometheus(&nmswriter),
+  WARN_NOT_OK(server_->metric_registry()->WriteForPrometheus(&nmswriter, MetricPrometheusOptions()),
       "Couldn't write metrics for native metrics storage");
   for (const auto& kv : server_metrics) {
     if (tserver_metrics_whitelist_.find(kv.first) != tserver_metrics_whitelist_.end()) {
       RETURN_NOT_OK(DoPrometheusMetricsSnapshot(table, session, "tserver",
             server_->permanent_uuid(), kv.first, kv.second));
     }
+  }
+
+  if (tserver_metrics_whitelist_.find("node_up") != tserver_metrics_whitelist_.end()) {
+    RETURN_NOT_OK(DoPrometheusMetricsSnapshot(table, session, "tserver",
+                                              server_->permanent_uuid(), "node_up",
+                                              1));
   }
 
   if (tserver_metrics_whitelist_.find("disk_usage") != tserver_metrics_whitelist_.end()) {

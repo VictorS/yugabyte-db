@@ -73,7 +73,10 @@ TEST_F(DebugUtilTest, TestStackTrace) {
   StackTrace t;
   t.Collect(1);
   string trace = t.Symbolize();
+  LOG(INFO) << "Trace:\n" << trace;
   ASSERT_STR_CONTAINS(trace, "yb::DebugUtilTest_TestStackTrace_Test::TestBody");
+  ASSERT_STR_CONTAINS(trace, "testing::internal::UnitTestImpl::RunAllTests()");
+  ASSERT_STR_CONTAINS(trace, "main");
 }
 
 TEST_F(DebugUtilTest, TestGetStackTrace) {
@@ -273,22 +276,40 @@ TEST_F(DebugUtilTest, TestConcurrentStackTrace) {
 }
 
 TEST_F(DebugUtilTest, LongOperationTracker) {
-  struct TestLogSink : public google::LogSink {
+  class TestLogSink : public google::LogSink {
+   public:
     void send(google::LogSeverity severity, const char* full_filename,
               const char* base_filename, int line,
               const struct ::tm* tm_time,
               const char* message, size_t message_len) override {
-      log_messages.emplace_back(message, message_len);
+      std::lock_guard<std::mutex> lock(mutex_);
+      log_messages_.emplace_back(message, message_len);
     }
 
-    std::vector<std::string> log_messages;
+    size_t MessagesSize() {
+      std::lock_guard<std::mutex> lock(mutex_);
+      return log_messages_.size();
+    }
+
+    std::string MessageAt(size_t idx) {
+      std::lock_guard<std::mutex> lock(mutex_);
+      return log_messages_[idx];
+    }
+
+   private:
+    std::mutex mutex_;
+    std::vector<std::string> log_messages_;
   };
 
-  const auto kTimeMultiplier = RegularBuildVsSanitizers(1, 10);
+#ifndef NDEBUG
+  const auto kTimeMultiplier = RegularBuildVsSanitizers(3, 10);
+#else
+  const auto kTimeMultiplier = 1;
+#endif
 
   const auto kShortDuration = 100ms * kTimeMultiplier;
-  const auto kMidDuration = 300ms * kTimeMultiplier;
-  const auto kLongDuration = 500ms * kTimeMultiplier;
+  const auto kMidDuration = 400ms * kTimeMultiplier;
+  const auto kLongDuration = 1000ms * kTimeMultiplier;
   TestLogSink log_sink;
   google::AddLogSink(&log_sink);
   auto se = ScopeExit([&log_sink] {
@@ -311,9 +332,11 @@ TEST_F(DebugUtilTest, LongOperationTracker) {
 
   std::this_thread::sleep_for(kLongDuration);
 
-  ASSERT_EQ(log_sink.log_messages.size(), 2);
-  ASSERT_STR_CONTAINS(log_sink.log_messages[0], "Op2");
-  ASSERT_STR_CONTAINS(log_sink.log_messages[1], "Op4");
+  ASSERT_EQ(log_sink.MessagesSize(), 4);
+  ASSERT_STR_CONTAINS(log_sink.MessageAt(0), "Op2");
+  ASSERT_STR_CONTAINS(log_sink.MessageAt(1), "Op2");
+  ASSERT_STR_CONTAINS(log_sink.MessageAt(2), "Op4");
+  ASSERT_STR_CONTAINS(log_sink.MessageAt(3), "Op4");
 }
 
 } // namespace yb

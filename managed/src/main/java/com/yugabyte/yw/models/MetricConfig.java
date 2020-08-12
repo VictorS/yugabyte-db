@@ -121,6 +121,14 @@ public class MetricConfig extends Model {
       String countQuery = getQuery(metricPrefix + "_count", additionalFilters);
       return "(" + sumQuery + ") / (" + countQuery + ")";
     }
+    else if (metric.contains("/")) {
+      String[] metricNames = metric.split("/");
+      MetricConfig numerator = get(metricNames[0]);
+      MetricConfig denominator = get(metricNames[1]);
+      String numQuery = numerator.getQuery(numerator.getConfig().metric, additionalFilters);
+      String demonQuery = denominator.getQuery(denominator.getConfig().metric, additionalFilters);
+      return String.format("((%s)/(%s))*100", numQuery, demonQuery);
+    }
 
     String queryStr;
     StringBuilder query = new StringBuilder();
@@ -131,6 +139,17 @@ public class MetricConfig extends Model {
     // If we have additional filters, we add them
     if (!additionalFilters.isEmpty()) {
       filters.putAll(additionalFilters);
+      // The kubelet volume metrics only has the persistentvolumeclain field
+      // as well as namespace. Adding any other field will cause the query to fail.
+      if (metric.startsWith("kubelet_volume")) {
+        filters.remove("pod_name");
+        filters.remove("container_name");
+      }
+      // For all other metrics, it is safe to remove the filter if
+      // it exists.
+      else {
+        filters.remove("persistentvolumeclaim");
+      }
     }
 
     if (!filters.isEmpty()) {

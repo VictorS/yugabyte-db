@@ -4,6 +4,7 @@ package com.yugabyte.yw.controllers;
 
 import static com.yugabyte.yw.common.AssertHelper.assertErrorNodeValue;
 import static com.yugabyte.yw.common.AssertHelper.assertValue;
+import static com.yugabyte.yw.common.AssertHelper.assertAuditEntry;
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.CoreMatchers.notNullValue;
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -18,6 +19,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.yugabyte.yw.common.FakeApiHelper;
 import com.yugabyte.yw.common.ModelFactory;
 import com.yugabyte.yw.models.Customer;
+import com.yugabyte.yw.models.Users;
 import org.hamcrest.CoreMatchers;
 import org.junit.Assert;
 import org.junit.Before;
@@ -35,12 +37,14 @@ import play.mvc.Result;
 
 public class AvailabilityZoneControllerTest extends FakeDBApplication {
   Customer defaultCustomer;
+  Users defaultUser;
   Provider defaultProvider;
   Region defaultRegion;
 
   @Before
   public void setUp() {
     defaultCustomer = ModelFactory.testCustomer();
+    defaultUser = ModelFactory.testUser(defaultCustomer);
     defaultProvider = ModelFactory.awsProvider(defaultCustomer);
     defaultRegion = Region.create(defaultProvider,
                                   "default-region",
@@ -52,12 +56,14 @@ public class AvailabilityZoneControllerTest extends FakeDBApplication {
   public void testListAvailabilityZonesWithInvalidProviderRegionUUID() {
     JsonNode json = doListAZAndVerifyResult(UUID.randomUUID(), UUID.randomUUID(), BAD_REQUEST);
     assertEquals("Invalid PlacementRegion/Provider UUID", json.get("error").asText());
+    assertAuditEntry(0, defaultCustomer.uuid);
   }
 
   @Test
   public void testListEmptyAvailabilityZonesWithValidProviderRegionUUID() {
     JsonNode json = doListAZAndVerifyResult(defaultProvider.uuid, defaultRegion.uuid, OK);
     assertTrue(json.isArray());
+    assertAuditEntry(0, defaultCustomer.uuid);
   }
 
   @Test
@@ -70,6 +76,7 @@ public class AvailabilityZoneControllerTest extends FakeDBApplication {
     assertEquals(az.code, json.get(0).findValue("code").asText());
     assertEquals(az.name, json.get(0).findValue("name").asText());
     assertTrue(json.get(0).findValue("active").asBoolean());
+    assertAuditEntry(0, defaultCustomer.uuid);
   }
 
   @Test
@@ -77,6 +84,7 @@ public class AvailabilityZoneControllerTest extends FakeDBApplication {
     JsonNode json =
         doCreateAZAndVerifyResult(UUID.randomUUID(), UUID.randomUUID(), null, BAD_REQUEST);
     assertEquals("Invalid PlacementRegion/Provider UUID", json.get("error").asText());
+    assertAuditEntry(0, defaultCustomer.uuid);
   }
 
   @Test
@@ -99,6 +107,7 @@ public class AvailabilityZoneControllerTest extends FakeDBApplication {
         azRequestJson, OK);
 
     assertEquals(2, json.size());
+    assertAuditEntry(1, defaultCustomer.uuid);
 
     assertThat(json.get("foo-az-1"), is(notNullValue()));
     assertThat(json.get("foo-az-1").get("uuid").toString(), is(notNullValue()));
@@ -118,6 +127,7 @@ public class AvailabilityZoneControllerTest extends FakeDBApplication {
     JsonNode json = doCreateAZAndVerifyResult(defaultProvider.uuid, defaultRegion.uuid,
         Json.newObject(), BAD_REQUEST);
     assertErrorNodeValue(json, "availabilityZones", "This field is required");
+    assertAuditEntry(0, defaultCustomer.uuid);
   }
 
   @Test
@@ -127,6 +137,7 @@ public class AvailabilityZoneControllerTest extends FakeDBApplication {
         randomUUID, BAD_REQUEST);
     Assert.assertThat(json.get("error").toString(),
             CoreMatchers.containsString("Invalid Region/AZ UUID:" + randomUUID));
+    assertAuditEntry(0, defaultCustomer.uuid);
   }
 
   @Test
@@ -136,6 +147,7 @@ public class AvailabilityZoneControllerTest extends FakeDBApplication {
     JsonNode json = doDeleteAZAndVerify(defaultProvider.uuid, defaultRegion.uuid, az.uuid, OK);
     az = AvailabilityZone.find.byId(az.uuid);
     assertTrue(json.get("success").asBoolean());
+    assertAuditEntry(1, defaultCustomer.uuid);
     assertFalse(az.active);
   }
 

@@ -29,6 +29,7 @@ import com.yugabyte.yw.common.CallHomeManager.CollectionLevel;
 public class CustomerConfig extends Model {
   public static final Logger LOG = LoggerFactory.getLogger(CustomerConfig.class);
   public static final String ALERTS_PREFERENCES = "preferences";
+  public static final String SMTP_INFO = "smtp info";
   public static final String CALLHOME_PREFERENCES = "callhome level";
 
   public enum ConfigType {
@@ -40,9 +41,6 @@ public class CustomerConfig extends Model {
 
     @EnumValue("CALLHOME")
     CALLHOME,
-
-    @EnumValue("KMS")
-    KMS,
 
     // TODO: move metric and other configs to this table as well.
     @EnumValue("OTHER")
@@ -88,7 +86,7 @@ public class CustomerConfig extends Model {
     JsonNode maskedData = data.deepCopy();
     for (Iterator<String> it = maskedData.fieldNames(); it.hasNext(); ) {
       String key = it.next();
-      if (key.contains("KEY") || key.contains("SECRET")) {
+      if (key.contains("KEY") || key.contains("SECRET") || key.contains("CREDENTIALS")) {
         ((ObjectNode) maskedData).put(key, maskedData.get(key).asText().replaceAll("(?<!^.?).(?!.?$)", "*"));
       }
     }
@@ -120,11 +118,29 @@ public class CustomerConfig extends Model {
     return customerConfig;
   }
 
+  public static CustomerConfig createSmtpConfig(UUID customerUUID, JsonNode payload) {
+    CustomerConfig customerConfig = new CustomerConfig();
+    customerConfig.type = ConfigType.ALERTS;
+    customerConfig.name = SMTP_INFO;
+    customerConfig.customerUUID = customerUUID;
+    customerConfig.data = payload;
+    customerConfig.save();
+    return customerConfig;
+  }
+
   public static CustomerConfig getAlertConfig(UUID customerUUID) {
     return CustomerConfig.find.where()
       .eq("customer_uuid", customerUUID)
       .eq("type", ConfigType.ALERTS.toString())
       .eq("name", ALERTS_PREFERENCES)
+      .findUnique();
+  }
+
+  public static CustomerConfig getSmtpConfig(UUID customerUUID) {
+    return CustomerConfig.find.where()
+      .eq("customer_uuid", customerUUID)
+      .eq("type", ConfigType.ALERTS.toString())
+      .eq("name", SMTP_INFO)
       .findUnique();
   }
 
@@ -174,52 +190,5 @@ public class CustomerConfig extends Model {
       callhomeConfig.update();
     }
     return callhomeConfig;
-  }
-
-  public static CustomerConfig createKMSConfig(
-          UUID customerUUID,
-          String keyProvider,
-          ObjectNode data
-  ) {
-    CustomerConfig customerConfig = new CustomerConfig();
-    customerConfig.type = ConfigType.KMS;
-    customerConfig.name = keyProvider;
-    customerConfig.customerUUID = customerUUID;
-    customerConfig.data = data;
-    customerConfig.save();
-    return customerConfig;
-  }
-
-  public static CustomerConfig getKMSConfig(UUID customerUUID, String keyProvider) {
-    return CustomerConfig.find.where()
-            .eq("customer_uuid", customerUUID)
-            .eq("type", ConfigType.KMS)
-            .eq("name", keyProvider)
-            .findUnique();
-  }
-
-  public static ObjectNode getKMSAuthObj(UUID customerUUID, String keyProvider) {
-    CustomerConfig config = getKMSConfig(customerUUID, keyProvider);
-    if (config == null) return null;
-    return config.getData().deepCopy();
-  }
-
-  public static List<CustomerConfig> listKMSConfigs(UUID customerUUID) {
-    return CustomerConfig.find.where()
-            .eq("customer_uuid", customerUUID)
-            .eq("type", ConfigType.KMS)
-            .findList();
-  }
-
-  public static CustomerConfig updateKMSAuthObj(
-          UUID customerUUID,
-          String keyProvider,
-          ObjectNode newData
-  ) {
-    CustomerConfig config = getKMSConfig(customerUUID, keyProvider);
-    if (config == null) return null;
-    config.data = newData;
-    config.save();
-    return config;
   }
 }

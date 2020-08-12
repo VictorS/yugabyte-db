@@ -32,6 +32,7 @@
 #include <string>
 
 #include <boost/intrusive_ptr.hpp>
+#include <boost/optional.hpp>
 
 #include <boost/preprocessor/cat.hpp>
 #include <boost/preprocessor/seq/for_each.hpp>
@@ -199,6 +200,8 @@ class StatusErrorCode {
  public:
   virtual uint8_t Category() const = 0;
   virtual size_t EncodedSize() const = 0;
+  // Serialization should not be changed after error code is released, since it is
+  // transferred over the wire.
   virtual uint8_t* Encode(uint8_t* out) const = 0;
   virtual std::string Message() const = 0;
 
@@ -219,6 +222,8 @@ class StatusErrorCodeImpl : public StatusErrorCode {
   explicit StatusErrorCodeImpl(Value&& value) : value_(std::move(value)) {}
 
   explicit StatusErrorCodeImpl(const Status& status);
+
+  static boost::optional<StatusErrorCodeImpl> FromStatus(const Status& status);
 
   uint8_t Category() const override {
     return kCategory;
@@ -274,6 +279,39 @@ bool operator!=(const typename Tag::Value& lhs, const StatusErrorCodeImpl<Tag>& 
   return lhs != rhs.value();
 }
 
+// Base class for all error tags that use integral representation.
+// For instance time duration.
+template <class Traits>
+class IntegralBackedErrorTag {
+ public:
+  typedef typename Traits::ValueType Value;
+
+  static Value Decode(const uint8_t* source) {
+    if (!source) {
+      return Value();
+    }
+    return Traits::FromRepresentation(
+        Load<typename Traits::RepresentationType, LittleEndian>(source));
+  }
+
+  static size_t DecodeSize(const uint8_t* source) {
+    return sizeof(typename Traits::RepresentationType);
+  }
+
+  static size_t EncodedSize(Value value) {
+    return sizeof(typename Traits::RepresentationType);
+  }
+
+  static uint8_t* Encode(Value value, uint8_t* out) {
+    Store<typename Traits::RepresentationType, LittleEndian>(out, Traits::ToRepresentation(value));
+    return out + sizeof(typename Traits::RepresentationType);
+  }
+
+  static std::string DecodeToString(const uint8_t* source) {
+    return Traits::ToString(Decode(source));
+  }
+};
+
 template <class Enum>
 typename std::enable_if<std::is_enum<Enum>::value, std::string>::type
 IntegralToString(Enum e) {
@@ -286,33 +324,28 @@ IntegralToString(Value value) {
   return std::to_string(value);
 }
 
+// Base class for error tags that have integral value type.
+template <class Value>
+class PlainIntegralTraits {
+ public:
+  typedef Value ValueType;
+  typedef ValueType RepresentationType;
+
+  static ValueType FromRepresentation(RepresentationType source) {
+    return source;
+  }
+
+  static RepresentationType ToRepresentation(ValueType value) {
+    return value;
+  }
+
+  static std::string ToString(ValueType value) {
+    return IntegralToString(value);
+  }
+};
+
 template <class ValueType>
-struct IntegralErrorTag {
-  typedef ValueType Value;
-
-  static Value Decode(const uint8_t* source) {
-    if (!source) {
-      return Value();
-    }
-    return Load<Value, LittleEndian>(source);
-  }
-
-  static size_t DecodeSize(const uint8_t* source) {
-    return sizeof(Value);
-  }
-
-  static size_t EncodedSize(Value value) {
-    return sizeof(Value);
-  }
-
-  static uint8_t* Encode(Value value, uint8_t* out) {
-    Store<Value, LittleEndian>(out, value);
-    return out + sizeof(Value);
-  }
-
-  static std::string DecodeToString(const uint8_t* source) {
-    return IntegralToString(Decode(source));
-  }
+struct IntegralErrorTag : public IntegralBackedErrorTag<PlainIntegralTraits<ValueType>> {
 };
 
 struct StatusCategoryDescription {
@@ -329,7 +362,19 @@ struct StatusCategoryDescription {
   }
 };
 
-class Status {
+#ifdef __clang__
+#define NODISCARD_CLASS [[nodiscard]] // NOLINT
+#else
+#define NODISCARD_CLASS // NOLINT
+#endif
+
+#ifndef DISABLE_STATUS_NODISCARD
+#define STATUS_NODISCARD_CLASS NODISCARD_CLASS
+#else
+#define STATUS_NODISCARD_CLASS
+#endif
+
+class STATUS_NODISCARD_CLASS Status {
  public:
   // Wrapper class for OK status to forbid creation of Result from Status::OK in compile time
   class OK {
@@ -492,6 +537,16 @@ template <class Tag>
 StatusErrorCodeImpl<Tag>::StatusErrorCodeImpl(const Status& status)
     : value_(Tag::Decode(status.ErrorData(Tag::kCategory))) {}
 
+template <class Tag>
+boost::optional<StatusErrorCodeImpl<Tag>> StatusErrorCodeImpl<Tag>::FromStatus(
+    const Status& status) {
+  const auto* error_data = status.ErrorData(Tag::kCategory);
+  if (!error_data) {
+    return boost::none;
+  }
+  return StatusErrorCodeImpl<Tag>(Tag::Decode(error_data));
+}
+
 inline Status&& MoveStatus(Status&& status) {
   return std::move(status);
 }
@@ -523,6 +578,12 @@ inline std::ostream& operator<<(std::ostream& out, const Status& status) {
             __FILE__, \
             __LINE__, \
             ::yb::Format(__VA_ARGS__)))
+
+#define STATUS_EC_FORMAT(status_type, error_code, ...) \
+    (::yb::Status(::yb::Status::BOOST_PP_CAT(k, status_type), \
+            __FILE__, \
+            __LINE__, \
+            ::yb::Format(__VA_ARGS__), error_code))
 
 // Utility macros to perform the appropriate check. If the check fails,
 // returns the specified (error) Status, with the given message.

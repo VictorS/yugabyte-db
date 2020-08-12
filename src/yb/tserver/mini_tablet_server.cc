@@ -67,7 +67,6 @@ using std::pair;
 
 using yb::consensus::Consensus;
 using yb::consensus::ConsensusOptions;
-using yb::consensus::OpId;
 using yb::consensus::RaftPeerPB;
 using yb::consensus::RaftConfigPB;
 using yb::log::Log;
@@ -207,7 +206,9 @@ Status MiniTabletServer::CompactTablets() {
     return Status::OK();
   }
   return ForAllTablets(this, [](TabletPeer* tablet_peer) {
-    tablet_peer->tablet()->ForceRocksDBCompactInTest();
+    if (tablet_peer->tablet()) {
+      tablet_peer->tablet()->ForceRocksDBCompactInTest();
+    }
     return Status::OK();
   });
 }

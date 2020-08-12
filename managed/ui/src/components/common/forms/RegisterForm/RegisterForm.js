@@ -5,27 +5,28 @@ import { PageHeader } from 'react-bootstrap';
 import { YBButton, YBFormInput, YBSegmentedButtonGroup } from '../fields';
 import YBLogo from '../../YBLogo/YBLogo';
 import { browserHistory } from 'react-router';
-import { getPromiseState } from 'utils/PromiseUtils';
+import { getPromiseState } from '../../../../utils/PromiseUtils';
 import { Field, Form, Formik } from 'formik';
 import * as Yup from "yup";
 
 import './RegisterForm.scss';
 
 class RegisterForm extends Component {
-  componentWillReceiveProps(nextProps) {
-    const {customer: {authToken}} =  nextProps;
-    if (getPromiseState(authToken).isSuccess()) {
+  componentDidUpdate(prevProps) {
+    const { customer: { authToken }} =  this.props;
+    const location = Object.assign({}, browserHistory.getCurrentLocation());
+    if (getPromiseState(authToken).isSuccess() && location.pathname !== '/') {
       browserHistory.push('/');
     }
   }
 
   submitRegister = formValues => {
-    const {registerCustomer} = this.props;
+    const { registerCustomer } = this.props;
     registerCustomer(formValues);
   };
 
   render() {
-    const { customer: {authToken} } = this.props;
+    const { customer: { authToken }} = this.props;
 
     const validationSchema = Yup.object().shape({
       code: Yup.string()
@@ -34,11 +35,11 @@ class RegisterForm extends Component {
 
       name: Yup.string()
         .required('Enter a name'),
-      
+
       email: Yup.string()
         .required('Enter email')
         .email('This is not a valid email'),
-      
+
       password: Yup.string()
         .required('Enter password'),
 
@@ -69,10 +70,8 @@ class RegisterForm extends Component {
               this.submitRegister(values);
               setSubmitting(false);
             }}
-            render={({
-              handleSubmit,
-              isSubmitting
-            }) => (
+          >
+            {({ handleSubmit, isSubmitting }) => (
               <Form className="form-register" onSubmit={handleSubmit}>
                 <div className={`alert alert-danger form-error-alert ${authToken.error ? '': 'hide'}`}>
                   {<strong>{JSON.stringify(authToken.error)}</strong>}
@@ -91,7 +90,7 @@ class RegisterForm extends Component {
                 </div>
               </Form>
             )}
-          />
+          </Formik>
         </div>
       </div>
     );

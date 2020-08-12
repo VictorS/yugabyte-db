@@ -16,8 +16,9 @@ import com.yugabyte.yw.commissioner.SubTaskGroupQueue;
 import com.yugabyte.yw.commissioner.UserTaskDetails;
 import com.yugabyte.yw.commissioner.UserTaskDetails.SubTaskGroupType;
 import com.yugabyte.yw.commissioner.tasks.UniverseDefinitionTaskBase.ServerType;
+import com.yugabyte.yw.commissioner.tasks.UniverseDefinitionTaskBase;
 import com.yugabyte.yw.commissioner.tasks.subtasks.AnsibleConfigureServers;
-import com.yugabyte.yw.forms.RollingRestartParams;
+import com.yugabyte.yw.forms.UpgradeParams;
 import com.yugabyte.yw.forms.UniverseDefinitionTaskParams.UserIntent;
 import com.yugabyte.yw.models.Universe;
 import com.yugabyte.yw.models.helpers.CloudSpecificInfo;
@@ -53,26 +54,11 @@ public class UpgradeUniverse extends UniverseTaskBase {
     Install
   }
 
-  public static class Params extends RollingRestartParams {}
+  public static class Params extends UpgradeParams {}
 
   @Override
-  protected RollingRestartParams taskParams() {
-    return (RollingRestartParams)taskParams;
-  }
-
-  private static <T> Collector<T, ?, T> toSingleNodeDetail(UUID uniUUID) {
-      return Collectors.collectingAndThen(
-              Collectors.toList(),
-              leaderMasterNodeList -> {
-                if (leaderMasterNodeList.size() != 1) {
-                  String errMsg = "Could not find a master matching the master leader address " +
-                          "retrieved in universe " + uniUUID;
-                  LOG.error(errMsg);
-                  throw new RuntimeException(errMsg);
-                }
-                return leaderMasterNodeList.get(0);
-              }
-      );
+  protected UpgradeParams taskParams() {
+    return (UpgradeParams)taskParams;
   }
 
   @Override
@@ -105,6 +91,9 @@ public class UpgradeUniverse extends UniverseTaskBase {
       // we don't update the nodes properly but we do wipe the data from the backend (postgres).
       // JIRA ENG-2519 would track this.
       boolean didUpgradeUniverse = false;
+      // Retrieve master leader address of given universe
+      final String leaderMasterAddress = universe.getMasterLeaderHostText();
+      NodeDetails masterLeaderNode = null;
       switch (taskParams().taskType) {
         case Software:
           LOG.info("Upgrading software version to {} in universe {}",
@@ -112,74 +101,99 @@ public class UpgradeUniverse extends UniverseTaskBase {
           // TODO: This is assuming that master nodes is a subset of tserver node, instead we should do a union
           createDownloadTasks(tServerNodes);
 
-          if (taskParams().rollingUpgrade) {
-            // Disable the load balancer for rolling upgrade.
-            createLoadBalancerStateChangeTask(false /*enable*/)
-                .setSubTaskGroupType(getTaskSubGroupType());
+          switch (taskParams().upgradeOption) {
+            case ROLLING_UPGRADE:
+              // Disable the load balancer for rolling upgrade.
+              createLoadBalancerStateChangeTask(false /*enable*/)
+                  .setSubTaskGroupType(getTaskSubGroupType());
 
-            // Retrieve master leader address of given universe
-            final String leaderMasterAddress = universe.getMasterLeaderHostText();
-            if (leaderMasterAddress.isEmpty()) {
-              // If we cannot successfully retrieve the leader master address,
-              // then default to legacy rolling upgrade behavior
+              if (!leaderMasterAddress.isEmpty()) {
+                // Attempt to isolate the master leader node from the other masters to ensure
+                // that it is upgraded last amongst master nodes
+                masterLeaderNode = masterNodes
+                        .stream()
+                        .filter(node -> node.cloudInfo.private_ip.equals(leaderMasterAddress))
+                        .findFirst()
+                        .orElse(null);
+                if (masterLeaderNode != null) {
+                  masterNodes.removeIf(node ->
+                          node.cloudInfo.private_ip.equals(leaderMasterAddress));
+                }
+              }
               createAllUpgradeTasks(masterNodes, ServerType.MASTER);
-            } else {
-              // Separate master leader from follower masters
-              NodeDetails masterLeaderNode = masterNodes
-                      .stream()
-                      .filter(node -> node.cloudInfo.private_ip.equals(leaderMasterAddress))
-                      .collect(toSingleNodeDetail(universe.universeUUID));
-              masterNodes.removeIf(node -> node.cloudInfo.private_ip.equals(leaderMasterAddress));
-
-              // Order of rolling upgrades should be:
-              // 1) Non-leader masters
-              // 2) Leader master
-              // 3) Tservers
+              if (masterLeaderNode != null) {
+                createSingleNodeUpgradeTasks(masterLeaderNode, ServerType.MASTER);
+              }
+              createAllUpgradeTasks(tServerNodes, ServerType.TSERVER);
+              // Enable the load balancer for rolling upgrade only.
+              createLoadBalancerStateChangeTask(true /*enable*/)
+                      .setSubTaskGroupType(SubTaskGroupType.ConfigureUniverse);
+              break;
+            case NON_ROLLING_UPGRADE:
               createAllUpgradeTasks(masterNodes, ServerType.MASTER);
-              createSingleNodeUpgradeTasks(masterLeaderNode, ServerType.MASTER);
-            }
-            createAllUpgradeTasks(tServerNodes, ServerType.TSERVER);
-            // Enable the load balancer for rolling upgrade only.
-            createLoadBalancerStateChangeTask(true /*enable*/)
-                    .setSubTaskGroupType(SubTaskGroupType.ConfigureUniverse);
-          } else {
-            createAllUpgradeTasks(masterNodes, ServerType.MASTER);
-            createAllUpgradeTasks(tServerNodes, ServerType.TSERVER);
+              createAllUpgradeTasks(tServerNodes, ServerType.TSERVER);
+              break;
+            case NON_RESTART_UPGRADE:
+              throw new IllegalArgumentException(
+                      "Software Upgrade cannot use NON_RESTART_UPGRADE option");
           }
 
           didUpgradeUniverse = true;
           break;
         case GFlags:
-          if (!taskParams().masterGFlags.isEmpty() &&
-              !taskParams().masterGFlags.equals(primIntent.masterGFlags)) {
+          if (!taskParams().masterGFlags.equals(primIntent.masterGFlags)) {
             LOG.info("Updating Master gflags: {} for {} nodes in universe {}",
                 taskParams().masterGFlags, masterNodes.size(), universe.name);
-            if (!taskParams().rollingUpgrade) {
-              createServerConfFileUpdateTasks(masterNodes, ServerType.MASTER);
+
+            switch (taskParams().upgradeOption) {
+              case ROLLING_UPGRADE:
+                // Attempt to isolate the master leader node from the other masters to ensure
+                // that it is upgraded last amongst master nodes
+                masterLeaderNode = masterNodes
+                        .stream()
+                        .filter(node -> node.cloudInfo.private_ip.equals(leaderMasterAddress))
+                        .findFirst()
+                        .orElse(null);
+                if (masterLeaderNode != null) {
+                  masterNodes.removeIf(node ->
+                          node.cloudInfo.private_ip.equals(leaderMasterAddress));
+                }
+                break;
+              case NON_ROLLING_UPGRADE:
+              case NON_RESTART_UPGRADE:
+                createServerConfFileUpdateTasks(masterNodes, ServerType.MASTER);
+                break;
             }
+
             createAllUpgradeTasks(masterNodes, ServerType.MASTER);
+            if (masterLeaderNode != null) {
+              createSingleNodeUpgradeTasks(masterLeaderNode, ServerType.MASTER);
+            }
             didUpgradeUniverse = true;
           }
-          if (!taskParams().tserverGFlags.isEmpty() &&
-              !taskParams().tserverGFlags.equals(primIntent.tserverGFlags)) {
-            LOG.info("Updating T-Server gflags: {} for {} nodes in universe {}",
-                taskParams().tserverGFlags, tServerNodes.size(), universe.name);
-            if (taskParams().rollingUpgrade) {
-              // Disable the load balancer for rolling upgrade.
-              createLoadBalancerStateChangeTask(false /*enable*/)
-                  .setSubTaskGroupType(getTaskSubGroupType());
-            } else {
-              // Update conf files only when doing non-rolling upgrade.
-              createServerConfFileUpdateTasks(tServerNodes, ServerType.TSERVER);
+          if (!taskParams().tserverGFlags.equals(primIntent.tserverGFlags)) {
+            switch (taskParams().upgradeOption) {
+              case ROLLING_UPGRADE:
+                // Disable the load balancer for rolling upgrade.
+                createLoadBalancerStateChangeTask(false /*enable*/)
+                        .setSubTaskGroupType(getTaskSubGroupType());
+                break;
+              case NON_ROLLING_UPGRADE:
+              case NON_RESTART_UPGRADE:
+                createServerConfFileUpdateTasks(tServerNodes, ServerType.TSERVER);
+                break;
             }
+
             createAllUpgradeTasks(tServerNodes, ServerType.TSERVER);
+
             // Enable the load balancer for rolling upgrade only.
-            if (taskParams().rollingUpgrade) {
+            if (taskParams().upgradeOption == UpgradeParams.UpgradeOption.ROLLING_UPGRADE) {
               createLoadBalancerStateChangeTask(true /*enable*/)
-                  .setSubTaskGroupType(SubTaskGroupType.ConfigureUniverse);
+                      .setSubTaskGroupType(SubTaskGroupType.ConfigureUniverse);
             }
             didUpgradeUniverse = true;
           }
+
           break;
       }
 
@@ -207,9 +221,9 @@ public class UpgradeUniverse extends UniverseTaskBase {
       subTaskGroupQueue = new SubTaskGroupQueue(userTaskUUID);
       // If the task failed, we don't want the loadbalancer to be disabled,
       // so we enable it again in case of errors.
-      if (taskParams().rollingUpgrade) {
+      if (taskParams().upgradeOption == UpgradeParams.UpgradeOption.ROLLING_UPGRADE) {
         createLoadBalancerStateChangeTask(true /*enable*/)
-            .setSubTaskGroupType(SubTaskGroupType.ConfigureUniverse);
+                .setSubTaskGroupType(SubTaskGroupType.ConfigureUniverse);
       }
       subTaskGroupQueue.run();
       throw t;
@@ -221,14 +235,19 @@ public class UpgradeUniverse extends UniverseTaskBase {
 
   private void createAllUpgradeTasks(List<NodeDetails> nodes,
                                      ServerType processType) {
-    if (taskParams().rollingUpgrade) {
-      for (NodeDetails node : nodes) {
-        createSingleNodeUpgradeTasks(node, processType);
-      }
-    } else {
-      createMultipleNodeUpgradeTasks(nodes, processType);
-      createWaitForServersTasks(nodes, processType)
-         .setSubTaskGroupType(SubTaskGroupType.ConfigureUniverse);
+    switch (taskParams().upgradeOption) {
+      case ROLLING_UPGRADE:
+        for (NodeDetails node : nodes) {
+          createSingleNodeUpgradeTasks(node, processType);
+        }
+        break;
+      case NON_ROLLING_UPGRADE:
+        createMultipleNonRollingNodeUpgradeTasks(nodes, processType);
+        createWaitForServersTasks(nodes, processType)
+                .setSubTaskGroupType(SubTaskGroupType.ConfigureUniverse);
+        break;
+      case NON_RESTART_UPGRADE:
+        createNonRestartUpgradeTasks(nodes, processType);
     }
   }
 
@@ -286,14 +305,29 @@ public class UpgradeUniverse extends UniverseTaskBase {
     createWaitForServersTasks(new HashSet<NodeDetails>(Arrays.asList(node)), processType);
     createWaitForServerReady(node, processType, getSleepTimeForProcess(processType))
         .setSubTaskGroupType(subGroupType);
+    createWaitForKeyInMemoryTask(node);
     createSetNodeStateTask(node, NodeDetails.NodeState.Live).setSubTaskGroupType(subGroupType);
+  }
+
+  private void createNonRestartUpgradeTasks(List<NodeDetails> nodes, ServerType processType) {
+    SubTaskGroupType subGroupType = getTaskSubGroupType();
+    createSetNodeStateTasks(nodes, UpdateGFlags).setSubTaskGroupType(subGroupType);
+
+    createSetFlagInMemoryTasks(
+            nodes, processType, true /* force */, processType == ServerType.MASTER ?
+                    taskParams().masterGFlags : taskParams().tserverGFlags,
+            false /* updateMasterAddrs */);
+
+    createSetNodeStateTasks(nodes, NodeDetails.NodeState.Live).setSubTaskGroupType(subGroupType);
   }
 
   // This is used for non-rolling upgrade, where each operation is done in parallel across all
   // the provided nodes per given process type.
-  private void createMultipleNodeUpgradeTasks(List<NodeDetails> nodes, ServerType processType) {
+  private void createMultipleNonRollingNodeUpgradeTasks(
+          List<NodeDetails> nodes, ServerType processType) {
     NodeDetails.NodeState nodeState = taskParams().taskType == UpgradeTaskType.Software ?
         UpgradeSoftware : UpdateGFlags;
+
     SubTaskGroupType subGroupType = getTaskSubGroupType();
     createSetNodeStateTasks(nodes, nodeState).setSubTaskGroupType(subGroupType);
     createServerControlTasks(nodes, processType, "stop").setSubTaskGroupType(subGroupType);
@@ -347,6 +381,8 @@ public class UpgradeUniverse extends UniverseTaskBase {
     params.azUuid = node.azUuid;
     // Add in the node placement uuid.
     params.placementUuid = node.placementUuid;
+    // Add testing flag.
+    params.itestS3PackagePath = taskParams().itestS3PackagePath;
     // Add task type
     params.type = type;
     params.setProperty("processType", processType.toString());
@@ -357,8 +393,12 @@ public class UpgradeUniverse extends UniverseTaskBase {
     } else if (type == UpgradeTaskType.GFlags) {
       if (processType.equals(ServerType.MASTER)) {
         params.gflags = taskParams().masterGFlags;
+        params.gflagsToRemove = userIntent.masterGFlags.keySet().stream().filter(
+                flag -> !taskParams().masterGFlags.containsKey(flag)).collect(Collectors.toSet());
       } else {
         params.gflags = taskParams().tserverGFlags;
+        params.gflagsToRemove = userIntent.tserverGFlags.keySet().stream().filter(
+                flag -> !taskParams().tserverGFlags.containsKey(flag)).collect(Collectors.toSet());
       }
     }
 

@@ -447,9 +447,10 @@ void Reactor::ScanIdleConnections() {
     if (connection_delta > connection_keepalive_time_) {
       conn->Shutdown(STATUS_FORMAT(
           NetworkError, "Connection timed out after $0", ToSeconds(connection_delta)));
-      VLOG_WITH_PREFIX(1)
-          << "Timing out connection " << conn->ToString() << " - it has been idle for "
-          << ToSeconds(connection_delta) << "s (delta: " << ToSeconds(connection_delta)
+      LOG_WITH_PREFIX(INFO)
+          << "DEBUG: Closing idle connection: " << conn->ToString()
+          << " - it has been idle for " << ToSeconds(connection_delta) << "s";
+      VLOG(1) << "(delta: " << ToSeconds(connection_delta)
           << ", current time: " << ToSeconds(cur_time_.time_since_epoch())
           << ", last activity time: " << ToSeconds(last_activity_time.time_since_epoch()) << ")";
       server_conns_.erase(c++);
@@ -535,7 +536,8 @@ Status Reactor::FindOrStartConnection(const ConnectionId &conn_id,
 
   // Create a new socket and start connecting to the remote.
   auto sock = VERIFY_RESULT(CreateClientSocket(conn_id.remote()));
-  if (!messenger_->test_outbound_ip_base_.is_unspecified()) {
+  if (messenger_->has_outbound_ip_base_.load(std::memory_order_acquire) &&
+      !messenger_->test_outbound_ip_base_.is_unspecified()) {
     auto address_bytes(messenger_->test_outbound_ip_base_.to_v4().to_bytes());
     // Use different addresses for public/private endpoints.
     // Private addresses are even, and public are odd.

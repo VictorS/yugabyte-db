@@ -20,6 +20,7 @@
 
 #include "yb/common/hybrid_time.h"
 #include "yb/common/redis_protocol.pb.h"
+#include "yb/common/row_mark.h"
 #include "yb/common/transaction.h"
 
 #include "yb/docdb/conflict_resolution.h"
@@ -28,6 +29,7 @@
 #include "yb/docdb/docdb-internal.h"
 #include "yb/docdb/docdb.h"
 #include "yb/docdb/docdb.pb.h"
+#include "yb/docdb/docdb_debug.h"
 #include "yb/docdb/docdb_compaction_filter.h"
 #include "yb/docdb/docdb_rocksdb_util.h"
 #include "yb/docdb/docdb_util.h"
@@ -39,11 +41,15 @@
 #include "yb/docdb/value.h"
 #include "yb/docdb/value_type.h"
 #include "yb/docdb/deadline_info.h"
+#include "yb/docdb/docdb_types.h"
+#include "yb/docdb/kv_debug.h"
 
 #include "yb/gutil/strings/substitute.h"
 #include "yb/rocksutil/write_batch_formatter.h"
 #include "yb/rocksutil/yb_rocksdb.h"
 #include "yb/server/hybrid_clock.h"
+
+#include "yb/util/bitmap.h"
 #include "yb/util/bytes_formatter.h"
 #include "yb/util/date_time.h"
 #include "yb/util/enums.h"
@@ -51,6 +57,8 @@
 #include "yb/util/status.h"
 #include "yb/util/metrics.h"
 #include "yb/util/flag_tags.h"
+
+#include "yb/yql/cql/ql/util/errcodes.h"
 
 using std::endl;
 using std::list;
@@ -63,22 +71,35 @@ using std::vector;
 using std::make_shared;
 
 using yb::HybridTime;
-using yb::util::FormatBytesAsStr;
-using yb::FormatRocksDBSliceAsStr;
+using yb::FormatBytesAsStr;
 using strings::Substitute;
 
 using namespace std::placeholders;
 
 DEFINE_test_flag(bool, docdb_sort_weak_intents_in_tests, false,
                 "Sort weak intents to make their order deterministic.");
+DEFINE_bool(enable_transaction_sealing, false,
+            "Whether transaction sealing is enabled.");
+DEFINE_test_flag(bool, fail_on_replicated_batch_idx_set_in_txn_record, false,
+                 "Fail when a set of replicated batch indexes is found in txn record.");
 
 namespace yb {
 namespace docdb {
 
 namespace {
 
-constexpr size_t kMaxWordsPerEncodedHybridTimeWithValueType =
-    ((kMaxBytesPerEncodedHybridTime + 1) + sizeof(size_t) - 1) / sizeof(size_t);
+// Slice parts with the number of slices fixed at compile time.
+template <int N>
+struct FixedSliceParts {
+  FixedSliceParts(const std::array<Slice, N>& input) : parts(input.data()) { // NOLINT
+  }
+
+  operator SliceParts() const {
+    return SliceParts(parts, N);
+  }
+
+  const Slice* parts;
+};
 
 // Main intent data::
 // Prefix + DocPath + IntentType + DocHybridTime -> TxnId + value of the intent
@@ -86,14 +107,16 @@ constexpr size_t kMaxWordsPerEncodedHybridTimeWithValueType =
 // Prefix + TxnId + DocHybridTime -> Main intent data key
 //
 // Expects that last entry of key is DocHybridTime.
+template <int N>
 void AddIntent(
     const TransactionId& transaction_id,
-    const SliceParts& key,
+    const FixedSliceParts<N>& key,
     const SliceParts& value,
-    rocksdb::WriteBatch* rocksdb_write_batch) {
+    rocksdb::WriteBatch* rocksdb_write_batch,
+    Slice reverse_value_prefix = Slice()) {
   char reverse_key_prefix[1] = { ValueTypeAsChar::kTransactionId };
   size_t doc_ht_buffer[kMaxWordsPerEncodedHybridTimeWithValueType];
-  auto doc_ht_slice = key.parts[key.num_parts - 1];
+  auto doc_ht_slice = key.parts[N - 1];
   memcpy(doc_ht_buffer, doc_ht_slice.data(), doc_ht_slice.size());
   for (size_t i = 0; i != kMaxWordsPerEncodedHybridTimeWithValueType; ++i) {
     doc_ht_buffer[i] = ~doc_ht_buffer[i];
@@ -102,11 +125,18 @@ void AddIntent(
 
   std::array<Slice, 3> reverse_key = {{
       Slice(reverse_key_prefix, sizeof(reverse_key_prefix)),
-      Slice(transaction_id.data, transaction_id.size()),
+      transaction_id.AsSlice(),
       doc_ht_slice,
   }};
   rocksdb_write_batch->Put(key, value);
-  rocksdb_write_batch->Put(reverse_key, key);
+  if (reverse_value_prefix.empty()) {
+    rocksdb_write_batch->Put(reverse_key, key);
+  } else {
+    std::array<Slice, N + 1> reverse_value;
+    reverse_value[0] = reverse_value_prefix;
+    memcpy(&reverse_value[1], key.parts, sizeof(*key.parts) * N);
+    rocksdb_write_batch->Put(reverse_key, reverse_value);
+  }
 }
 
 // key should be valid prefix of doc key, ending with some complete pritimive value or group end.
@@ -142,8 +172,9 @@ struct DetermineKeysToLockResult {
 Result<DetermineKeysToLockResult> DetermineKeysToLock(
     const std::vector<std::unique_ptr<DocOperation>>& doc_write_ops,
     const google::protobuf::RepeatedPtrField<KeyValuePairPB>& read_pairs,
-    IsolationLevel isolation_level,
-    OperationKind operation_kind,
+    const IsolationLevel isolation_level,
+    const OperationKind operation_kind,
+    const RowMarkType row_mark_type,
     bool transactional_table,
     PartialRangeKeyIntents partial_range_key_intents) {
   DetermineKeysToLockResult result;
@@ -157,7 +188,8 @@ Result<DetermineKeysToLockResult> DetermineKeysToLock(
     if (isolation_level != IsolationLevel::NON_TRANSACTIONAL) {
       level = isolation_level;
     }
-    IntentTypeSet strong_intent_types = GetStrongIntentTypeSet(level, operation_kind);
+    IntentTypeSet strong_intent_types = GetStrongIntentTypeSet(level, operation_kind,
+                                                               row_mark_type);
     if (isolation_level == IsolationLevel::SERIALIZABLE_ISOLATION &&
         operation_kind == OperationKind::kWrite &&
         doc_op->RequireReadSnapshot()) {
@@ -199,8 +231,8 @@ Result<DetermineKeysToLockResult> DetermineKeysToLock(
   if (!read_pairs.empty()) {
     RETURN_NOT_OK(EnumerateIntents(
         read_pairs,
-        [&result](IntentStrength strength, Slice value, KeyBytes* key) {
-          RefCntPrefix prefix(key->data());
+        [&result](IntentStrength strength, Slice value, KeyBytes* key, LastKey) {
+          RefCntPrefix prefix(key->AsSlice());
           auto intent_types = strength == IntentStrength::kStrong
               ? IntentTypeSet({IntentType::kStrongRead})
               : IntentTypeSet({IntentType::kWeakRead});
@@ -235,24 +267,34 @@ void FilterKeysToLock(LockBatchEntries *keys_locked) {
   keys_locked->erase(w, keys_locked->end());
 }
 
+// Buffer for encoding DocHybridTime
+class DocHybridTimeBuffer {
+ public:
+  DocHybridTimeBuffer() {
+    buffer_[0] = ValueTypeAsChar::kHybridTime;
+  }
+
+  Slice EncodeWithValueType(const DocHybridTime& doc_ht) {
+    auto end = doc_ht.EncodedInDocDbFormat(buffer_.data() + 1);
+    return Slice(buffer_.data(), end);
+  }
+
+  Slice EncodeWithValueType(HybridTime ht, IntraTxnWriteId write_id) {
+    return EncodeWithValueType(DocHybridTime(ht, write_id));
+  }
+ private:
+  std::array<char, 1 + kMaxBytesPerEncodedHybridTime> buffer_;
+};
+
 }  // namespace
-
-const SliceKeyBound& SliceKeyBound::Invalid() {
-  static SliceKeyBound result;
-  return result;
-}
-
-const IndexBound& IndexBound::Empty() {
-  static IndexBound result;
-  return result;
-}
 
 Result<PrepareDocWriteOperationResult> PrepareDocWriteOperation(
     const std::vector<std::unique_ptr<DocOperation>>& doc_write_ops,
     const google::protobuf::RepeatedPtrField<KeyValuePairPB>& read_pairs,
     const scoped_refptr<Histogram>& write_lock_latency,
-    IsolationLevel isolation_level,
-    OperationKind operation_kind,
+    const IsolationLevel isolation_level,
+    const OperationKind operation_kind,
+    const RowMarkType row_mark_type,
     bool transactional_table,
     CoarseTimePoint deadline,
     PartialRangeKeyIntents partial_range_key_intents,
@@ -260,8 +302,8 @@ Result<PrepareDocWriteOperationResult> PrepareDocWriteOperation(
   PrepareDocWriteOperationResult result;
 
   auto determine_keys_to_lock_result = VERIFY_RESULT(DetermineKeysToLock(
-      doc_write_ops, read_pairs, isolation_level, operation_kind, transactional_table,
-      partial_range_key_intents));
+      doc_write_ops, read_pairs, isolation_level, operation_kind, row_mark_type,
+      transactional_table, partial_range_key_intents));
   if (determine_keys_to_lock_result.lock_batch.empty()) {
     LOG(ERROR) << "Empty lock batch, doc_write_ops: " << yb::ToString(doc_write_ops)
                << ", read pairs: " << yb::ToString(read_pairs);
@@ -283,7 +325,7 @@ Result<PrepareDocWriteOperationResult> PrepareDocWriteOperation(
   return result;
 }
 
-Status SetDocOpQLErrorResponse(DocOperation* doc_op, std::string err_msg) {
+Status SetDocOpQLErrorResponse(DocOperation* doc_op, string err_msg) {
   switch (doc_op->OpType()) {
     case DocOperation::Type::QL_WRITE_OPERATION: {
       const auto &resp = down_cast<QLWriteOperation *>(doc_op)->response();
@@ -312,17 +354,28 @@ Status ExecuteDocWriteOperation(const vector<unique_ptr<DocOperation>>& doc_writ
                                 KeyValueWriteBatchPB* write_batch,
                                 InitMarkerBehavior init_marker_behavior,
                                 std::atomic<int64_t>* monotonic_counter,
-                                HybridTime* restart_read_ht) {
+                                HybridTime* restart_read_ht,
+                                const string& table_name) {
   DCHECK_ONLY_NOTNULL(restart_read_ht);
   DocWriteBatch doc_write_batch(doc_db, init_marker_behavior, monotonic_counter);
   DocOperationApplyData data = {&doc_write_batch, deadline, read_time, restart_read_ht};
   for (const unique_ptr<DocOperation>& doc_op : doc_write_ops) {
     Status s = doc_op->Apply(data);
     if (s.IsQLError()) {
+      string error_msg;
+      if (ql::GetErrorCode(s) == ql::ErrorCode::CONDITION_NOT_SATISFIED) {
+        // Generating the error message here because 'table_name'
+        // is not available on the lower level - in doc_op->Apply().
+        error_msg = Format("Condition on table $0 was not satisfied.", table_name);
+      } else {
+        error_msg =  s.message().ToBuffer();
+      }
+
       // Ensure we set appropriate error in the response object for QL errors.
-      SetDocOpQLErrorResponse(doc_op.get(), s.message().ToBuffer());
+      RETURN_NOT_OK(SetDocOpQLErrorResponse(doc_op.get(), error_msg));
       continue;
     }
+
     RETURN_NOT_OK(s);
   }
   doc_write_batch.MoveToWriteBatchPB(write_batch);
@@ -349,7 +402,7 @@ void PrepareNonTransactionWriteBatch(
       CHECK(s.ok())
           << "Failed decoding key: " << s.ToString() << "; "
           << "Problematic key: " << BestEffortDocDBKeyToStr(KeyBytes(kv_pair.key())) << "\n"
-          << "value: " << util::FormatBytesAsStr(kv_pair.value()) << "\n"
+          << "value: " << FormatBytesAsStr(kv_pair.value()) << "\n"
           << "put_batch:\n" << put_batch.DebugString();
     }
 #endif
@@ -364,6 +417,8 @@ void PrepareNonTransactionWriteBatch(
     // same key (row/column) within a transaction. We set it based on the position of the write
     // operation in its write batch.
 
+    hybrid_time = kv_pair.has_external_hybrid_time() ?
+        HybridTime(kv_pair.external_hybrid_time()) : hybrid_time;
     std::array<Slice, 2> key_parts = {{
         Slice(kv_pair.key()),
         doc_ht_buffer.EncodeWithValueType(hybrid_time, write_id),
@@ -399,6 +454,7 @@ Status EnumerateWeakIntents(
   }
 
   const bool has_cotable_id = *key.cdata() == ValueTypeAsChar::kTableId;
+  const bool has_pgtable_id = *key.cdata() == ValueTypeAsChar::kPgTableOid;
   {
     bool is_table_root_key = false;
     if (has_cotable_id) {
@@ -411,6 +467,16 @@ Status EnumerateWeakIntents(
       }
       encoded_key_buffer->AppendRawBytes(key.cdata(), kUuidSize + 1);
       is_table_root_key = key[kUuidSize + 1] == ValueTypeAsChar::kGroupEnd;
+    } else if (has_pgtable_id) {
+      const auto kMinExpectedSize = sizeof(PgTableOid) + 2;
+      if (key.size() < kMinExpectedSize) {
+        return STATUS_FORMAT(
+            Corruption,
+            "Expected an encoded SubDocKey starting with a pgtable id to be at least $0 bytes long",
+            kMinExpectedSize);
+      }
+      encoded_key_buffer->AppendRawBytes(key.cdata(), sizeof(PgTableOid) + 1);
+      is_table_root_key = key[sizeof(PgTableOid) + 1] == ValueTypeAsChar::kGroupEnd;
     } else {
       is_table_root_key = *key.cdata() == ValueTypeAsChar::kGroupEnd;
     }
@@ -426,9 +492,10 @@ Status EnumerateWeakIntents(
   }
 
   // For any non-empty key we already know that the empty key intent is weak.
-  functor(IntentStrength::kWeak, kEmptyIntentValue, encoded_key_buffer);
+  RETURN_NOT_OK(functor(
+      IntentStrength::kWeak, kEmptyIntentValue, encoded_key_buffer, LastKey::kFalse));
 
-  auto hashed_part_size = VERIFY_RESULT(DocKey::EncodedSize(key, DocKeyPart::HASHED_PART_ONLY));
+  auto hashed_part_size = VERIFY_RESULT(DocKey::EncodedSize(key, DocKeyPart::kUpToHash));
 
   // Remove kGroupEnd that we just added to generate a weak intent.
   encoded_key_buffer->RemoveLastByte();
@@ -451,7 +518,8 @@ Status EnumerateWeakIntents(
     }
 
     // Generate a week intent that only includes the hash component.
-    RETURN_NOT_OK(functor(IntentStrength::kWeak, kEmptyIntentValue, encoded_key_buffer));
+    RETURN_NOT_OK(functor(
+        IntentStrength::kWeak, kEmptyIntentValue, encoded_key_buffer, LastKey::kFalse));
 
     // Remove the kGroupEnd we added a bit earlier so we can append some range components.
     encoded_key_buffer->RemoveLastByte();
@@ -474,7 +542,8 @@ Status EnumerateWeakIntents(
       return Status::OK();
     }
     if (partial_range_key_intents || *key.cdata() == ValueTypeAsChar::kGroupEnd) {
-      RETURN_NOT_OK(functor(IntentStrength::kWeak, kEmptyIntentValue, encoded_key_buffer));
+      RETURN_NOT_OK(functor(
+          IntentStrength::kWeak, kEmptyIntentValue, encoded_key_buffer, LastKey::kFalse));
     }
     encoded_key_buffer->RemoveLastByte();
     range_key_start = key.cdata();
@@ -492,7 +561,8 @@ Status EnumerateWeakIntents(
       // This was the last subkey.
       return Status::OK();
     }
-    RETURN_NOT_OK(functor(IntentStrength::kWeak, kEmptyIntentValue, encoded_key_buffer));
+    RETURN_NOT_OK(functor(
+        IntentStrength::kWeak, kEmptyIntentValue, encoded_key_buffer, LastKey::kFalse));
     subkey_start = key.cdata();
   }
 
@@ -505,10 +575,11 @@ Status EnumerateWeakIntents(
 
 Status EnumerateIntents(
     Slice key, const Slice& intent_value, const EnumerateIntentsCallback& functor,
-    KeyBytes* encoded_key_buffer, PartialRangeKeyIntents partial_range_key_intents) {
+    KeyBytes* encoded_key_buffer, PartialRangeKeyIntents partial_range_key_intents,
+    LastKey last_key) {
   RETURN_NOT_OK(EnumerateWeakIntents(
       key, functor, encoded_key_buffer, partial_range_key_intents));
-  return functor(IntentStrength::kStrong, intent_value, encoded_key_buffer);
+  return functor(IntentStrength::kStrong, intent_value, encoded_key_buffer, last_key);
 }
 
 Status EnumerateIntents(
@@ -516,12 +587,14 @@ Status EnumerateIntents(
     const EnumerateIntentsCallback& functor, PartialRangeKeyIntents partial_range_key_intents) {
   KeyBytes encoded_key;
 
-  for (int index = 0; index < kv_pairs.size(); ++index) {
+  for (int index = 0; index < kv_pairs.size(); ) {
     const auto &kv_pair = kv_pairs.Get(index);
+    ++index;
     CHECK(!kv_pair.key().empty());
     CHECK(!kv_pair.value().empty());
     RETURN_NOT_OK(EnumerateIntents(
-        kv_pair.key(), kv_pair.value(), functor, &encoded_key, partial_range_key_intents));
+        kv_pair.key(), kv_pair.value(), functor, &encoded_key, partial_range_key_intents,
+        LastKey(index == kv_pairs.size())));
   }
 
   return Status::OK();
@@ -536,19 +609,26 @@ class PrepareTransactionWriteBatchHelper {
   PrepareTransactionWriteBatchHelper(HybridTime hybrid_time,
                                      rocksdb::WriteBatch* rocksdb_write_batch,
                                      const TransactionId& transaction_id,
+                                     const Slice& replicated_batches_state,
                                      IntraTxnWriteId* intra_txn_write_id)
       : hybrid_time_(hybrid_time),
         rocksdb_write_batch_(rocksdb_write_batch),
         transaction_id_(transaction_id),
+        replicated_batches_state_(replicated_batches_state),
         intra_txn_write_id_(intra_txn_write_id) {
   }
 
-  void Setup(IsolationLevel isolation_level, OperationKind kind) {
-    strong_intent_types_ = GetStrongIntentTypeSet(isolation_level, kind);
+  void Setup(
+      IsolationLevel isolation_level,
+      OperationKind kind,
+      RowMarkType row_mark) {
+    row_mark_ = row_mark;
+    strong_intent_types_ = GetStrongIntentTypeSet(isolation_level, kind, row_mark);
   }
 
   // Using operator() to pass this object conveniently to EnumerateIntents.
-  CHECKED_STATUS operator()(IntentStrength intent_strength, Slice value_slice, KeyBytes* key) {
+  CHECKED_STATUS operator()(IntentStrength intent_strength, Slice value_slice, KeyBytes* key,
+                            LastKey last_key) {
     if (intent_strength == IntentStrength::kWeak) {
       weak_intents_[key->data()] |= StrongToWeak(strong_intent_types_);
       return Status::OK();
@@ -556,14 +636,19 @@ class PrepareTransactionWriteBatchHelper {
 
     const auto transaction_value_type = ValueTypeAsChar::kTransactionId;
     const auto write_id_value_type = ValueTypeAsChar::kWriteId;
+    const auto row_lock_value_type = ValueTypeAsChar::kRowLock;
     IntraTxnWriteId big_endian_write_id = BigEndian::FromHost32(*intra_txn_write_id_);
     std::array<Slice, 5> value = {{
         Slice(&transaction_value_type, 1),
-        Slice(transaction_id_.data, transaction_id_.size()),
+        transaction_id_.AsSlice(),
         Slice(&write_id_value_type, 1),
         Slice(pointer_cast<char*>(&big_endian_write_id), sizeof(big_endian_write_id)),
-        value_slice
+        value_slice,
     }};
+    // Store a row lock indicator rather than data (in value_slice) for row lock intents.
+    if (IsValidRowMarkType(row_mark_)) {
+      value.back() = Slice(&row_lock_value_type, 1);
+    }
 
     ++*intra_txn_write_id_;
 
@@ -572,12 +657,19 @@ class PrepareTransactionWriteBatchHelper {
 
     DocHybridTimeBuffer doc_ht_buffer;
 
-    std::array<Slice, 3> key_parts = {{
+    constexpr size_t kNumKeyParts = 3;
+    std::array<Slice, kNumKeyParts> key_parts = {{
         key->AsSlice(),
         Slice(intent_type, 2),
         doc_ht_buffer.EncodeWithValueType(hybrid_time_, write_id_++),
     }};
-    AddIntent(transaction_id_, key_parts, value, rocksdb_write_batch_);
+
+    Slice reverse_value_prefix;
+    if (last_key && FLAGS_enable_transaction_sealing) {
+      reverse_value_prefix = replicated_batches_state_;
+    }
+    AddIntent<kNumKeyParts>(
+        transaction_id_, key_parts, value, rocksdb_write_batch_, reverse_value_prefix);
 
     return Status::OK();
   }
@@ -589,16 +681,16 @@ class PrepareTransactionWriteBatchHelper {
 
     std::array<Slice, 2> value = {{
         Slice(&transaction_id_value_type, 1),
-        Slice(transaction_id_.data, transaction_id_.size()),
+        transaction_id_.AsSlice(),
     }};
 
-    if (PREDICT_TRUE(!FLAGS_docdb_sort_weak_intents_in_tests)) {
+    if (PREDICT_TRUE(!FLAGS_TEST_docdb_sort_weak_intents_in_tests)) {
       for (const auto& intent_and_types : weak_intents_) {
         AddWeakIntent(intent_and_types, value, &doc_ht_buffer);
       }
     } else {
       // This is done in tests when deterministic DocDB state is required.
-      std::vector<std::pair<std::string, IntentTypeSet>> intents_and_types(
+      std::vector<std::pair<KeyBuffer, IntentTypeSet>> intents_and_types(
           weak_intents_.begin(), weak_intents_.end());
       sort(intents_and_types.begin(), intents_and_types.end());
       for (const auto& intent_and_types : intents_and_types) {
@@ -609,27 +701,30 @@ class PrepareTransactionWriteBatchHelper {
 
  private:
   void AddWeakIntent(
-      const std::pair<std::string, IntentTypeSet>& intent_and_types,
+      const std::pair<KeyBuffer, IntentTypeSet>& intent_and_types,
       const std::array<Slice, 2>& value,
       DocHybridTimeBuffer* doc_ht_buffer) {
     char intent_type[2] = { ValueTypeAsChar::kIntentTypeSet,
                             static_cast<char>(intent_and_types.second.ToUIntPtr()) };
-    std::array<Slice, 3> key = {{
-        Slice(intent_and_types.first),
+    constexpr size_t kNumKeyParts = 3;
+    std::array<Slice, kNumKeyParts> key = {{
+        intent_and_types.first.AsSlice(),
         Slice(intent_type, 2),
         doc_ht_buffer->EncodeWithValueType(hybrid_time_, write_id_++),
     }};
 
-    AddIntent(transaction_id_, key, value, rocksdb_write_batch_);
+    AddIntent<kNumKeyParts>(transaction_id_, key, value, rocksdb_write_batch_);
   }
 
   // TODO(dtxn) weak & strong intent in one batch.
   // TODO(dtxn) extract part of code knowning about intents structure to lower level.
+  RowMarkType row_mark_;
   HybridTime hybrid_time_;
   rocksdb::WriteBatch* rocksdb_write_batch_;
   const TransactionId& transaction_id_;
+  Slice replicated_batches_state_;
   IntentTypeSet strong_intent_types_;
-  std::unordered_map<std::string, IntentTypeSet> weak_intents_;
+  std::unordered_map<KeyBuffer, IntentTypeSet, ByteBufferHash> weak_intents_;
   IntraTxnWriteId write_id_ = 0;
   IntraTxnWriteId* intra_txn_write_id_;
 };
@@ -651,14 +746,22 @@ void PrepareTransactionWriteBatch(
     const TransactionId& transaction_id,
     IsolationLevel isolation_level,
     PartialRangeKeyIntents partial_range_key_intents,
+    const Slice& replicated_batches_state,
     IntraTxnWriteId* write_id) {
   VLOG(4) << "PrepareTransactionWriteBatch(), write_id = " << *write_id;
 
+  RowMarkType row_mark = GetRowMarkTypeFromPB(put_batch);
+
   PrepareTransactionWriteBatchHelper helper(
-      hybrid_time, rocksdb_write_batch, transaction_id, write_id);
+      hybrid_time, rocksdb_write_batch, transaction_id, replicated_batches_state, write_id);
 
   if (!put_batch.write_pairs().empty()) {
-    helper.Setup(isolation_level, OperationKind::kWrite);
+    if (IsValidRowMarkType(row_mark)) {
+      LOG(WARNING) << "Performing a write with row lock "
+                   << RowMarkType_Name(row_mark)
+                   << " when only reads are expected";
+    }
+    helper.Setup(isolation_level, OperationKind::kWrite, row_mark);
 
     // We cannot recover from failures here, because it means that we cannot apply replicated
     // operation.
@@ -667,7 +770,7 @@ void PrepareTransactionWriteBatch(
   }
 
   if (!put_batch.read_pairs().empty()) {
-    helper.Setup(isolation_level, OperationKind::kRead);
+    helper.Setup(isolation_level, OperationKind::kRead, row_mark);
     CHECK_OK(EnumerateIntents(put_batch.read_pairs(), std::ref(helper), partial_range_key_intents));
   }
 
@@ -678,733 +781,24 @@ void PrepareTransactionWriteBatch(
 // Standalone functions
 // ------------------------------------------------------------------------------------------------
 
-namespace {
-
-void SeekToLowerBound(const SliceKeyBound& lower_bound, IntentAwareIterator* iter) {
-  if (lower_bound.is_exclusive()) {
-    iter->SeekPastSubKey(lower_bound.key());
-  } else {
-    iter->SeekForward(lower_bound.key());
-  }
-}
-
-// This function does not assume that object init_markers are present. If no init marker is present,
-// or if a tombstone is found at some level, it still looks for subkeys inside it if they have
-// larger timestamps.
-//
-// TODO(akashnil): ENG-1152: If object init markers were required, this read path may be optimized.
-// We look at all rocksdb keys with prefix = subdocument_key, and construct a subdocument out of
-// them, between the timestamp range high_ts and low_ts.
-//
-// The iterator is expected to be placed at the smallest key that is subdocument_key or later, and
-// after the function returns, the iterator should be placed just completely outside the
-// subdocument_key prefix. Although if high_subkey is specified, the iterator is only guaranteed
-// to be positioned after the high_subkey and not necessarily outside the subdocument_key prefix.
-// num_values_observed is used for queries on indices, and keeps track of the number of primitive
-// values observed thus far. In a query with lower index bound k, ignore the first k primitive
-// values before building the subdocument.
-CHECKED_STATUS BuildSubDocument(
-    IntentAwareIterator* iter,
-    const GetSubDocumentData& data,
-    DocHybridTime low_ts,
-    int64* num_values_observed) {
-  VLOG(3) << "BuildSubDocument data: " << data << " read_time: " << iter->read_time()
-          << " low_ts: " << low_ts;
-  while (iter->valid()) {
-    if (data.deadline_info && data.deadline_info->CheckAndSetDeadlinePassed()) {
-      return STATUS(Expired, "Deadline for query passed.");
-    }
-    // Since we modify num_values_observed on recursive calls, we keep a local copy of the value.
-    int64 current_values_observed = *num_values_observed;
-    auto key_data = VERIFY_RESULT(iter->FetchKey());
-    auto key = key_data.key;
-    const auto write_time = key_data.write_time;
-    VLOG(4) << "iter: " << SubDocKey::DebugSliceToString(key)
-            << ", key: " << SubDocKey::DebugSliceToString(data.subdocument_key);
-    DCHECK(key.starts_with(data.subdocument_key))
-        << "iter: " << SubDocKey::DebugSliceToString(key)
-        << ", key: " << SubDocKey::DebugSliceToString(data.subdocument_key);
-
-    // Key could be invalidated because we could move iterator, so back it up.
-    KeyBytes key_copy(key);
-    key = key_copy.AsSlice();
-    rocksdb::Slice value = iter->value();
-    // Checking that IntentAwareIterator returns an entry with correct time.
-    DCHECK(key_data.same_transaction ||
-           iter->read_time().global_limit >= write_time.hybrid_time())
-        << "Bad key: " << SubDocKey::DebugSliceToString(key)
-        << ", global limit: " << iter->read_time().global_limit
-        << ", write time: " << write_time.hybrid_time();
-
-    if (low_ts > write_time) {
-      VLOG(3) << "SeekPastSubKey: " << SubDocKey::DebugSliceToString(key);
-      iter->SeekPastSubKey(key);
-      continue;
-    }
-    Value doc_value;
-    RETURN_NOT_OK(doc_value.Decode(value));
-    ValueType value_type = doc_value.value_type();
-    if (key == data.subdocument_key) {
-      if (write_time == DocHybridTime::kMin)
-        return STATUS(Corruption, "No hybrid timestamp found on entry");
-
-      // We may need to update the TTL in individual columns.
-      if (write_time.hybrid_time() >= data.exp.write_ht) {
-        // We want to keep the default TTL otherwise.
-        if (doc_value.ttl() != Value::kMaxTtl) {
-          data.exp.write_ht = write_time.hybrid_time();
-          data.exp.ttl = doc_value.ttl();
-        } else if (data.exp.ttl.IsNegative()) {
-          data.exp.ttl = -data.exp.ttl;
-        }
-      }
-
-      // If the hybrid time is kMin, then we must be using default TTL.
-      if (data.exp.write_ht == HybridTime::kMin) {
-        data.exp.write_ht = write_time.hybrid_time();
-      }
-
-      bool has_expired;
-      CHECK_OK(HasExpiredTTL(data.exp.write_ht, data.exp.ttl,
-                             iter->read_time().read, &has_expired));
-
-      // Treat an expired value as a tombstone written at the same time as the original value.
-      if (has_expired) {
-        doc_value = Value::Tombstone();
-        value_type = ValueType::kTombstone;
-      }
-
-      const bool is_collection = IsCollectionType(value_type);
-      // We have found some key that matches our entire subdocument_key, i.e. we didn't skip ahead
-      // to a lower level key (with optional object init markers).
-      if (is_collection || value_type == ValueType::kTombstone) {
-        if (low_ts < write_time) {
-          low_ts = write_time;
-        }
-        if (is_collection) {
-          *data.result = SubDocument(value_type);
-        }
-
-        // If the subkey lower bound filters out the key we found, we want to skip to the lower
-        // bound. If it does not, we want to seek to the next key. This prevents an infinite loop
-        // where the iterator keeps seeking to itself if the key we found matches the low subkey.
-        // TODO: why are not we doing this for arrays?
-        if (IsObjectType(value_type) && !data.low_subkey->CanInclude(key)) {
-          // Try to seek to the low_subkey for efficiency.
-          SeekToLowerBound(*data.low_subkey, iter);
-        } else {
-          VLOG(3) << "SeekPastSubKey: " << SubDocKey::DebugSliceToString(key);
-          iter->SeekPastSubKey(key);
-        }
-        continue;
-      } else {
-        if (!IsPrimitiveValueType(value_type)) {
-          return STATUS_FORMAT(Corruption,
-              "Expected primitive value type, got $0", value_type);
-        }
-        // TODO: the ttl_seconds in primitive value is currently only in use for CQL. At some
-        // point streamline by refactoring CQL to use the mutable Expiration in GetSubDocumentData.
-        if (data.exp.ttl == Value::kMaxTtl) {
-          doc_value.mutable_primitive_value()->SetTtl(-1);
-        } else {
-          int64_t time_since_write_seconds = (
-              server::HybridClock::GetPhysicalValueMicros(iter->read_time().read) -
-              server::HybridClock::GetPhysicalValueMicros(write_time.hybrid_time())) /
-              MonoTime::kMicrosecondsPerSecond;
-          int64_t ttl_seconds = std::max(static_cast<int64_t>(0),
-              data.exp.ttl.ToMilliseconds() /
-              MonoTime::kMillisecondsPerSecond - time_since_write_seconds);
-          doc_value.mutable_primitive_value()->SetTtl(ttl_seconds);
-        }
-        // Choose the user supplied timestamp if present.
-        const UserTimeMicros user_timestamp = doc_value.user_timestamp();
-        doc_value.mutable_primitive_value()->SetWriteTime(
-            user_timestamp == Value::kInvalidUserTimestamp
-            ? write_time.hybrid_time().GetPhysicalValueMicros()
-            : doc_value.user_timestamp());
-        if (!data.high_index->CanInclude(current_values_observed)) {
-          iter->SeekOutOfSubDoc(&key_copy);
-          return Status::OK();
-        }
-        if (data.low_index->CanInclude(*num_values_observed)) {
-          *data.result = SubDocument(doc_value.primitive_value());
-        }
-        (*num_values_observed)++;
-        VLOG(3) << "SeekOutOfSubDoc: " << SubDocKey::DebugSliceToString(key);
-        iter->SeekOutOfSubDoc(&key_copy);
-        return Status::OK();
-      }
-    }
-    SubDocument descendant{PrimitiveValue(ValueType::kInvalid)};
-    // TODO: what if the key we found is the same as before?
-    //       We'll get into an infinite recursion then.
-    {
-      IntentAwareIteratorPrefixScope prefix_scope(key, iter);
-      RETURN_NOT_OK(BuildSubDocument(
-          iter, data.Adjusted(key, &descendant), low_ts,
-          num_values_observed));
-
-    }
-    if (descendant.value_type() == ValueType::kInvalid) {
-      // The document was not found in this level (maybe a tombstone was encountered).
-      continue;
-    }
-
-    if (!data.low_subkey->CanInclude(key)) {
-      VLOG(3) << "Filtered by low_subkey: " << data.low_subkey->ToString()
-              << ", key: " << SubDocKey::DebugSliceToString(key);
-      // The value provided is lower than what we are looking for, seek to the lower bound.
-      SeekToLowerBound(*data.low_subkey, iter);
-      continue;
-    }
-
-    // We use num_values_observed as a conservative figure for lower bound and
-    // current_values_observed for upper bound so we don't lose any data we should be including.
-    if (!data.low_index->CanInclude(*num_values_observed)) {
-      continue;
-    }
-
-    if (!data.high_subkey->CanInclude(key)) {
-      VLOG(3) << "Filtered by high_subkey: " << data.high_subkey->ToString()
-              << ", key: " << SubDocKey::DebugSliceToString(key);
-      // We have encountered a subkey higher than our constraints, we should stop here.
-      return Status::OK();
-    }
-
-    if (!data.high_index->CanInclude(current_values_observed)) {
-      return Status::OK();
-    }
-
-    if (!IsObjectType(data.result->value_type())) {
-      *data.result = SubDocument();
-    }
-
-    SubDocument* current = data.result;
-    size_t num_children;
-    RETURN_NOT_OK(current->NumChildren(&num_children));
-    if (data.limit != 0 && num_children >= data.limit) {
-      // We have processed enough records.
-      return Status::OK();
-    }
-
-    if (data.count_only) {
-      // We need to only count the records that we found.
-      data.record_count++;
-    } else {
-      Slice temp = key;
-      temp.remove_prefix(data.subdocument_key.size());
-      for (;;) {
-        PrimitiveValue child;
-        RETURN_NOT_OK(child.DecodeFromKey(&temp));
-        if (temp.empty()) {
-          current->SetChild(child, std::move(descendant));
-          break;
-        }
-        current = current->GetOrAddChild(child).first;
-      }
-    }
-  }
-
-  return Status::OK();
-}
-
-}  // namespace
-
-yb::Status FindLastWriteTime(
-    IntentAwareIterator* iter,
-    const Slice& key_without_ht,
-    DocHybridTime* max_overwrite_time,
-    Expiration* exp,
-    Value* result_value) {
-
-  Slice value;
-  DocHybridTime doc_ht = *max_overwrite_time;
-  RETURN_NOT_OK(iter->FindLatestRecord(key_without_ht, &doc_ht, &value));
-  if (!iter->valid()) {
-    return Status::OK();
-  }
-
-  uint64_t merge_flags = 0;
-  MonoDelta ttl;
-  ValueType value_type;
-  RETURN_NOT_OK(Value::DecodePrimitiveValueType(value, &value_type, &merge_flags, &ttl));
-  if (value_type == ValueType::kInvalid) {
-    return Status::OK();
-  }
-
-  // We update the expiration if and only if the write time is later than the write time
-  // currently stored in expiration, and the record is not a regular record with default TTL.
-  // This is done independently of whether the row is a TTL row.
-  // In the case that the always_override flag is true, default TTL will not be preserved.
-  Expiration new_exp = *exp;
-  if (doc_ht.hybrid_time() >= exp->write_ht) {
-    // We want to keep the default TTL otherwise.
-    if (ttl != Value::kMaxTtl || merge_flags == Value::kTtlFlag || exp->always_override) {
-      new_exp.write_ht = doc_ht.hybrid_time();
-      new_exp.ttl = ttl;
-    } else if (exp->ttl.IsNegative()) {
-      new_exp.ttl = -new_exp.ttl;
-    }
-  }
-
-  // If we encounter a TTL row, we assign max_overwrite_time to be the write time of the
-  // original value/init marker.
-  if (merge_flags == Value::kTtlFlag) {
-    DocHybridTime new_ht;
-    RETURN_NOT_OK(iter->NextFullValue(&new_ht, &value));
-
-    // There could be a case where the TTL row exists, but the value has been
-    // compacted away. Then, it is treated as a Tombstone written at the time
-    // of the TTL row.
-    if (!iter->valid() && !new_exp.ttl.IsNegative()) {
-      new_exp.ttl = -new_exp.ttl;
-    } else {
-      ValueType value_type;
-      RETURN_NOT_OK(Value::DecodePrimitiveValueType(value, &value_type));
-      // Because we still do not know whether we are seeking something expired,
-      // we must take the max_overwrite_time as if the value were not expired.
-      doc_ht = new_ht;
-    }
-  }
-
-  if ((value_type == ValueType::kTombstone || value_type == ValueType::kInvalid) &&
-      !new_exp.ttl.IsNegative()) {
-    new_exp.ttl = -new_exp.ttl;
-  }
-  *exp = new_exp;
-
-  if (doc_ht > *max_overwrite_time) {
-    *max_overwrite_time = doc_ht;
-    VLOG(4) << "Max overwritten time for " << key_without_ht.ToDebugHexString() << ": "
-            << *max_overwrite_time;
-  }
-
-  if (result_value)
-    RETURN_NOT_OK(result_value->Decode(value));
-
-  return Status::OK();
-}
-
-yb::Status GetSubDocument(
-    const DocDB& doc_db,
-    const GetSubDocumentData& data,
-    const rocksdb::QueryId query_id,
-    const TransactionOperationContextOpt& txn_op_context,
-    CoarseTimePoint deadline,
-    const ReadHybridTime& read_time) {
-  auto iter = CreateIntentAwareIterator(
-      doc_db, BloomFilterMode::USE_BLOOM_FILTER, data.subdocument_key, query_id,
-      txn_op_context, deadline, read_time);
-  return GetSubDocument(iter.get(), data, nullptr /* projection */, SeekFwdSuffices::kFalse);
-}
-
-yb::Status GetSubDocument(
-    IntentAwareIterator *db_iter,
-    const GetSubDocumentData& data,
-    const std::vector<PrimitiveValue>* projection,
-    const SeekFwdSuffices seek_fwd_suffices) {
-  // TODO(dtxn) scan through all involved first transactions to cache statuses in a batch,
-  // so during building subdocument we don't need to request them one by one.
-  // TODO(dtxn) we need to restart read with scan_ht = commit_ht if some transaction was committed
-  // at time commit_ht within [scan_ht; read_request_time + max_clock_skew). Also we need
-  // to wait until time scan_ht = commit_ht passed.
-  // TODO(dtxn) for each scanned key (and its subkeys) we need to avoid new values commits at
-  // ht <= scan_ht (or just ht < scan_ht?)
-  // Question: what will break if we allow later commit at ht <= scan_ht ? Need to write down
-  // detailed example.
-  *data.doc_found = false;
-  DOCDB_DEBUG_LOG("GetSubDocument for key $0 @ $1", data.subdocument_key.ToDebugHexString(),
-                  db_iter->read_time().ToString());
-
-  // The latest time at which any prefix of the given key was overwritten.
-  DocHybridTime max_overwrite_ht(DocHybridTime::kMin);
-  VLOG(4) << "GetSubDocument(" << data << ")";
-
-  SubDocKey found_subdoc_key;
-  auto dockey_size =
-      VERIFY_RESULT(DocKey::EncodedSize(data.subdocument_key, DocKeyPart::WHOLE_DOC_KEY));
-
-  Slice key_slice(data.subdocument_key.data(), dockey_size);
-  IntentAwareIteratorPrefixScope prefix_scope(key_slice, db_iter);
-  if (seek_fwd_suffices) {
-    db_iter->SeekForward(key_slice);
-  } else {
-    db_iter->Seek(key_slice);
-  }
-  Value doc_value;
-  // Check ancestors for init markers, tombstones, and expiration, tracking
-  // the expiration and corresponding most recent write time in exp, and the
-  // the general most recent overwrite time in max_overwrite_ht
-  {
-    auto temp_key = data.subdocument_key;
-    temp_key.remove_prefix(dockey_size);
-    for (;;) {
-      auto decode_result = VERIFY_RESULT(SubDocKey::DecodeSubkey(&temp_key));
-      if (!decode_result) {
-        break;
-      }
-      RETURN_NOT_OK(FindLastWriteTime(db_iter, key_slice, &max_overwrite_ht, &data.exp));
-      key_slice = Slice(key_slice.data(), temp_key.data() - key_slice.data());
-    }
-  }
-
-  // By this point key_bytes is the encoded representation of the DocKey and all the subkeys of
-  // subdocument_key. Check for init-marker / tombstones at the top level, update max_overwrite_ht.
-  doc_value = Value(PrimitiveValue(ValueType::kInvalid));
-  RETURN_NOT_OK(FindLastWriteTime(db_iter, key_slice, &max_overwrite_ht, &data.exp, &doc_value));
-
-  const ValueType value_type = doc_value.value_type();
-
-  if (data.return_type_only) {
-    *data.doc_found = value_type != ValueType::kInvalid &&
-      !data.exp.ttl.IsNegative();
-    // Check for expiration.
-    if (*data.doc_found && max_overwrite_ht != DocHybridTime::kMin) {
-      bool has_expired;
-      CHECK_OK(HasExpiredTTL(data.exp.write_ht, data.exp.ttl,
-                             db_iter->read_time().read, &has_expired));
-      *data.doc_found = !has_expired;
-    }
-    if (*data.doc_found) {
-      // Observe that this will have the right type but not necessarily the right value.
-      *data.result = SubDocument(doc_value.primitive_value());
-    }
-    return Status::OK();
-  }
-
-  if (projection == nullptr) {
-    *data.result = SubDocument(ValueType::kInvalid);
-    int64 num_values_observed = 0;
-    IntentAwareIteratorPrefixScope prefix_scope(key_slice, db_iter);
-    RETURN_NOT_OK(BuildSubDocument(db_iter, data, max_overwrite_ht,
-                                   &num_values_observed));
-    *data.doc_found = data.result->value_type() != ValueType::kInvalid;
-    if (*data.doc_found) {
-      if (value_type == ValueType::kRedisSet) {
-        RETURN_NOT_OK(data.result->ConvertToRedisSet());
-      } else if (value_type == ValueType::kRedisTS) {
-        RETURN_NOT_OK(data.result->ConvertToRedisTS());
-      } else if (value_type == ValueType::kRedisSortedSet) {
-        RETURN_NOT_OK(data.result->ConvertToRedisSortedSet());
-      } else if (value_type == ValueType::kRedisList) {
-        RETURN_NOT_OK(data.result->ConvertToRedisList());
-      }
-    }
-    return Status::OK();
-  }
-  // Seed key_bytes with the subdocument key. For each subkey in the projection, build subdocument
-  // and reuse key_bytes while appending the subkey.
-  *data.result = SubDocument();
-  KeyBytes key_bytes(data.subdocument_key);
-  const size_t subdocument_key_size = key_bytes.size();
-  for (const PrimitiveValue& subkey : *projection) {
-    // Append subkey to subdocument key. Reserve extra kMaxBytesPerEncodedHybridTime + 1 bytes in
-    // key_bytes to avoid the internal buffer from getting reallocated and moved by SeekForward()
-    // appending the hybrid time, thereby invalidating the buffer pointer saved by prefix_scope.
-    subkey.AppendToKey(&key_bytes);
-    key_bytes.Reserve(key_bytes.size() + kMaxBytesPerEncodedHybridTime + 1);
-    // This seek is to initialize the iterator for BuildSubDocument call.
-    IntentAwareIteratorPrefixScope prefix_scope(key_bytes, db_iter);
-    db_iter->SeekForward(&key_bytes);
-    SubDocument descendant(ValueType::kInvalid);
-    int64 num_values_observed = 0;
-    RETURN_NOT_OK(BuildSubDocument(
-        db_iter, data.Adjusted(key_bytes, &descendant), max_overwrite_ht,
-        &num_values_observed));
-    *data.doc_found = descendant.value_type() != ValueType::kInvalid;
-    data.result->SetChild(subkey, std::move(descendant));
-
-    // Restore subdocument key by truncating the appended subkey.
-    key_bytes.Truncate(subdocument_key_size);
-  }
-  // Make sure the iterator is placed outside the whole document in the end.
-  key_bytes.Truncate(dockey_size);
-  key_bytes.AppendValueType(ValueType::kMaxByte);
-  db_iter->SeekForward(&key_bytes);
-  return Status::OK();
-}
-
-// Note: Do not use if also retrieving other value, as some work will be repeated.
-// Assumes every value has a TTL, and the TTL is stored in the row with this key.
-// Also observe that tombstone checking only works because we assume the key has
-// no ancestors.
-yb::Status GetTtl(const Slice& encoded_subdoc_key,
-                  IntentAwareIterator* iter,
-                  bool* doc_found,
-                  Expiration* exp) {
-  auto dockey_size =
-    VERIFY_RESULT(DocKey::EncodedSize(encoded_subdoc_key, DocKeyPart::WHOLE_DOC_KEY));
-  Slice key_slice(encoded_subdoc_key.data(), dockey_size);
-  iter->Seek(key_slice);
-  if (!iter->valid())
-    return Status::OK();
-  auto key_data = VERIFY_RESULT(iter->FetchKey());
-  if ((*doc_found = (!key_data.key.compare(key_slice)))) {
-    Value doc_value = Value(PrimitiveValue(ValueType::kInvalid));
-    RETURN_NOT_OK(doc_value.Decode(iter->value()));
-    if (doc_value.value_type() == ValueType::kTombstone) {
-      *doc_found = false;
-    } else {
-      exp->ttl = doc_value.ttl();
-      exp->write_ht = key_data.write_time.hybrid_time();
-    }
-  }
-  return Status::OK();
-}
-
-// ------------------------------------------------------------------------------------------------
-// Debug output
-// ------------------------------------------------------------------------------------------------
-
-namespace {
-
-Result<std::string> DocDBKeyToDebugStr(Slice key_slice, StorageDbType db_type, KeyType* key_type) {
-  *key_type = GetKeyType(key_slice, db_type);
-  SubDocKey subdoc_key;
-  switch (*key_type) {
-    case KeyType::kIntentKey:
-    {
-      auto decoded_intent_key = VERIFY_RESULT(DecodeIntentKey(key_slice));
-      RETURN_NOT_OK(subdoc_key.FullyDecodeFromKeyWithOptionalHybridTime(
-          decoded_intent_key.intent_prefix));
-      return subdoc_key.ToString() + " " + ToString(decoded_intent_key.intent_types) + " " +
-             decoded_intent_key.doc_ht.ToString();
-    }
-    case KeyType::kReverseTxnKey:
-    {
-      RETURN_NOT_OK(key_slice.consume_byte(ValueTypeAsChar::kTransactionId));
-      auto transaction_id = VERIFY_RESULT(DecodeTransactionId(&key_slice));
-      if (key_slice.empty() || key_slice.size() > kMaxBytesPerEncodedHybridTime + 1) {
-        return STATUS_FORMAT(
-            Corruption,
-            "Invalid doc hybrid time in reverse intent record, transaction id: $0, suffix: $1",
-            transaction_id, key_slice.ToDebugHexString());
-      }
-      size_t doc_ht_buffer[kMaxWordsPerEncodedHybridTimeWithValueType];
-      memcpy(doc_ht_buffer, key_slice.data(), key_slice.size());
-      for (size_t i = 0; i != kMaxWordsPerEncodedHybridTimeWithValueType; ++i) {
-        doc_ht_buffer[i] = ~doc_ht_buffer[i];
-      }
-      key_slice = Slice(pointer_cast<char*>(doc_ht_buffer), key_slice.size());
-
-      if (static_cast<ValueType>(key_slice[0]) != ValueType::kHybridTime) {
-        return STATUS_FORMAT(
-            Corruption,
-            "Invalid prefix of doc hybrid time in reverse intent record, transaction id: $0, "
-                "decoded suffix: $1",
-            transaction_id, key_slice.ToDebugHexString());
-      }
-      key_slice.consume_byte();
-      DocHybridTime doc_ht;
-      RETURN_NOT_OK(doc_ht.DecodeFrom(&key_slice));
-      return Format("TXN REV $0 $1", transaction_id, doc_ht);
-    }
-    case KeyType::kTransactionMetadata:
-    {
-      RETURN_NOT_OK(key_slice.consume_byte(ValueTypeAsChar::kTransactionId));
-      auto transaction_id = DecodeTransactionId(&key_slice);
-      RETURN_NOT_OK(transaction_id);
-      return Format("TXN META $0", *transaction_id);
-    }
-    case KeyType::kEmpty: FALLTHROUGH_INTENDED;
-    case KeyType::kValueKey:
-      RETURN_NOT_OK_PREPEND(
-          subdoc_key.FullyDecodeFrom(key_slice),
-          "Error: failed decoding RocksDB intent key " + FormatRocksDBSliceAsStr(key_slice));
-      return subdoc_key.ToString();
-  }
-  return STATUS_SUBSTITUTE(Corruption, "Corrupted KeyType: $0", yb::ToString(*key_type));
-}
-
-Result<std::string> DocDBValueToDebugStr(Slice value_slice, const KeyType& key_type) {
-  std::string prefix;
-  if (key_type == KeyType::kIntentKey) {
-    auto txn_id_res = VERIFY_RESULT(DecodeTransactionIdFromIntentValue(&value_slice));
-    prefix = Format("TransactionId($0) ", txn_id_res);
-    if (!value_slice.empty()) {
-          RETURN_NOT_OK(value_slice.consume_byte(ValueTypeAsChar::kWriteId));
-      if (value_slice.size() < sizeof(IntraTxnWriteId)) {
-        return STATUS_FORMAT(Corruption, "Not enought bytes for write id: $0", value_slice.size());
-      }
-      auto write_id = BigEndian::Load32(value_slice.data());
-      value_slice.remove_prefix(sizeof(write_id));
-      prefix += Format("WriteId($0) ", write_id);
-    }
-  }
-
-  // Empty values are allowed for weak intents.
-  if (!value_slice.empty() || key_type != KeyType::kIntentKey) {
-    Value v;
-    RETURN_NOT_OK_PREPEND(
-        v.Decode(value_slice),
-        Substitute("Error: failed to decode value $0", prefix));
-    return prefix + v.ToString();
-  } else {
-    return prefix + "none";
-  }
-}
-
-Result<std::string> DocDBValueToDebugStr(
-    KeyType key_type, const std::string& key_str, Slice value) {
-  switch (key_type) {
-    case KeyType::kTransactionMetadata: {
-      TransactionMetadataPB metadata_pb;
-      if (!metadata_pb.ParseFromArray(value.cdata(), value.size())) {
-        return STATUS_FORMAT(Corruption, "Bad metadata: $0", value.ToDebugHexString());
-      }
-      auto metadata = TransactionMetadata::FromPB(metadata_pb);
-      RETURN_NOT_OK(metadata);
-      return ToString(*metadata);
-    }
-    case KeyType::kReverseTxnKey: {
-      KeyType ignore_key_type;
-      return DocDBKeyToDebugStr(value, StorageDbType::kIntents, &ignore_key_type);
-    }
-    case KeyType::kEmpty: FALLTHROUGH_INTENDED;
-    case KeyType::kIntentKey: FALLTHROUGH_INTENDED;
-    case KeyType::kValueKey:
-      return DocDBValueToDebugStr(value, key_type);
-  }
-  FATAL_INVALID_ENUM_VALUE(KeyType, key_type);
-}
-
-template <class DumpStringFunc>
-void ProcessDumpEntry(
-    Slice key, Slice value, IncludeBinary include_binary, StorageDbType db_type,
-    DumpStringFunc func) {
-  KeyType key_type;
-  Result<std::string> key_str = DocDBKeyToDebugStr(key, db_type, &key_type);
-  if (!key_str.ok()) {
-    func(key_str.status().ToString());
-    return;
-  }
-  Result<std::string> value_str = DocDBValueToDebugStr(key_type, *key_str, value);
-  if (!value_str.ok()) {
-    func(value_str.status().CloneAndAppend(Substitute(". Key: $0", *key_str)).ToString());
-  } else {
-    func(Format("$0 -> $1", *key_str, *value_str));
-  }
-  if (include_binary) {
-    func(Format("$0 -> $1\n", FormatRocksDBSliceAsStr(key), FormatRocksDBSliceAsStr(value)));
-  }
-}
-
-void AppendToStream(const std::string& s, ostream* out) {
-  *out << s << std::endl;
-}
-
-void AppendToContainer(const std::string& s, std::unordered_set<std::string>* out) {
-  out->insert(s);
-}
-
-void AppendToContainer(const std::string& s, std::vector<std::string>* out) {
-  out->push_back(s);
-}
-
-std::string EntryToString(const rocksdb::Iterator& iterator, StorageDbType db_type) {
-  std::ostringstream out;
-  ProcessDumpEntry(
-      iterator.key(), iterator.value(), IncludeBinary::kFalse, db_type,
-      std::bind(&AppendToStream, _1, &out));
-  return out.str();
-}
-
-template <class DumpStringFunc>
-void DocDBDebugDump(rocksdb::DB* rocksdb, StorageDbType db_type, IncludeBinary include_binary,
-    DumpStringFunc dump_func) {
-  rocksdb::ReadOptions read_opts;
-  read_opts.query_id = rocksdb::kDefaultQueryId;
-  auto iter = unique_ptr<rocksdb::Iterator>(rocksdb->NewIterator(read_opts));
-  iter->SeekToFirst();
-
-  while (iter->Valid()) {
-    ProcessDumpEntry(iter->key(), iter->value(), include_binary, db_type, dump_func);
-    iter->Next();
-  }
-}
-
-}  // namespace
-
-void DocDBDebugDump(rocksdb::DB* rocksdb, ostream& out, StorageDbType db_type,
-                    IncludeBinary include_binary) {
-  DocDBDebugDump(rocksdb, db_type, include_binary, std::bind(&AppendToStream, _1, &out));
-}
-
-std::string DocDBDebugDumpToStr(DocDB docdb, IncludeBinary include_binary) {
-  stringstream ss;
-  DocDBDebugDump(docdb.regular, ss, StorageDbType::kRegular, include_binary);
-  if (docdb.intents) {
-    DocDBDebugDump(docdb.intents, ss, StorageDbType::kIntents, include_binary);
-  }
-  return ss.str();
-}
-
-std::string DocDBDebugDumpToStr(rocksdb::DB* rocksdb, StorageDbType db_type,
-                                IncludeBinary include_binary) {
-  stringstream ss;
-  DocDBDebugDump(rocksdb, ss, db_type, include_binary);
-  return ss.str();
-}
-
-template <class T>
-void DocDBDebugDumpToContainer(rocksdb::DB* rocksdb, T* out, StorageDbType db_type,
-                               IncludeBinary include_binary) {
-  void (*f)(const std::string&, T*) = AppendToContainer;
-  DocDBDebugDump(rocksdb, db_type, include_binary, std::bind(f, _1, out));
-}
-
-template
-void DocDBDebugDumpToContainer(
-    rocksdb::DB* rocksdb, std::unordered_set<std::string>* out, StorageDbType db_type,
-    IncludeBinary include_binary);
-
-template
-void DocDBDebugDumpToContainer(
-    rocksdb::DB* rocksdb, std::vector<std::string>* out, StorageDbType db_type,
-    IncludeBinary include_binary);
-
-template <class T>
-void DocDBDebugDumpToContainer(DocDB docdb, T* out, IncludeBinary include_binary) {
-  DocDBDebugDumpToContainer(docdb.regular, out, StorageDbType::kRegular, include_binary);
-  if (docdb.intents) {
-    DocDBDebugDumpToContainer(docdb.intents, out, StorageDbType::kIntents, include_binary);
-  }
-}
-
-template
-void DocDBDebugDumpToContainer(
-    DocDB docdb, std::unordered_set<std::string>* out, IncludeBinary include_binary);
-
-template
-void DocDBDebugDumpToContainer(
-    DocDB docdb, std::vector<std::string>* out, IncludeBinary include_binary);
-
 void AppendTransactionKeyPrefix(const TransactionId& transaction_id, KeyBytes* out) {
   out->AppendValueType(ValueType::kTransactionId);
-  out->AppendRawBytes(Slice(transaction_id.data, transaction_id.size()));
-}
-
-DocHybridTimeBuffer::DocHybridTimeBuffer() {
-  buffer_[0] = ValueTypeAsChar::kHybridTime;
-}
-
-Slice DocHybridTimeBuffer::EncodeWithValueType(const DocHybridTime& doc_ht) {
-  auto end = doc_ht.EncodedInDocDbFormat(buffer_.data() + 1);
-  return Slice(buffer_.data(), end);
+  out->AppendRawBytes(transaction_id.AsSlice());
 }
 
 CHECKED_STATUS IntentToWriteRequest(
     const Slice& transaction_id_slice,
     HybridTime commit_ht,
-    rocksdb::Iterator* reverse_index_iter,
+    const Slice& reverse_index_key,
+    const Slice& reverse_index_value,
     rocksdb::Iterator* intent_iter,
     rocksdb::WriteBatch* regular_batch,
     IntraTxnWriteId* write_id) {
   DocHybridTimeBuffer doc_ht_buffer;
-  intent_iter->Seek(reverse_index_iter->value());
-  if (!intent_iter->Valid() || intent_iter->key() != reverse_index_iter->value()) {
-    LOG(DFATAL) << "Unable to find intent: " << reverse_index_iter->value().ToDebugString()
-                << " for " << reverse_index_iter->key().ToDebugString();
+  intent_iter->Seek(reverse_index_value);
+  if (!intent_iter->Valid() || intent_iter->key() != reverse_index_value) {
+    LOG(DFATAL) << "Unable to find intent: " << reverse_index_value.ToDebugHexString()
+                << " for " << reverse_index_key.ToDebugHexString();
     return Status::OK();
   }
   auto intent = VERIFY_RESULT(ParseIntentKey(intent_iter->key(), transaction_id_slice));
@@ -1420,6 +814,11 @@ CHECKED_STATUS IntentToWriteRequest(
     DCHECK_GE(stored_write_id, *write_id)
       << "Value: " << intent_iter->value().ToDebugHexString();
     *write_id = stored_write_id;
+
+    // Intents for row locks should be ignored (i.e. should not be written as regular records).
+    if (intent_value.starts_with(ValueTypeAsChar::kRowLock)) {
+      return Status::OK();
+    }
 
     // After strip of prefix and suffix intent_key contains just SubDocKey w/o a hybrid time.
     // Time will be added when writing batch to RocksDB.
@@ -1457,67 +856,78 @@ CHECKED_STATUS IntentToWriteRequest(
 }
 
 Status PrepareApplyIntentsBatch(
-    const TransactionId &transaction_id, HybridTime commit_ht, const KeyBounds* key_bounds,
+    const TransactionId& transaction_id, HybridTime commit_ht, const KeyBounds* key_bounds,
     rocksdb::WriteBatch* regular_batch,
     rocksdb::DB* intents_db, rocksdb::WriteBatch* intents_batch) {
   // regular_batch or intents_batch could be null. In this case we don't fill apply batch for
   // appropriate DB.
 
-  Slice reverse_index_upperbound;
+  KeyBytes txn_reverse_index_prefix;
+  Slice transaction_id_slice = transaction_id.AsSlice();
+  AppendTransactionKeyPrefix(transaction_id, &txn_reverse_index_prefix);
+  txn_reverse_index_prefix.AppendValueType(ValueType::kMaxByte);
+  Slice key_prefix = txn_reverse_index_prefix.AsSlice();
+  key_prefix.remove_suffix(1);
+  const Slice reverse_index_upperbound = txn_reverse_index_prefix.AsSlice();
+
   auto reverse_index_iter = CreateRocksDBIterator(
       intents_db, &KeyBounds::kNoBounds, BloomFilterMode::DONT_USE_BLOOM_FILTER, boost::none,
       rocksdb::kDefaultQueryId, nullptr /* read_filter */, &reverse_index_upperbound);
 
   BoundedRocksDbIterator intent_iter;
-  // If we don't have regular_batch, it means that we just removing intents.
-  // We don't need intent iterator, since reverse index iterator is enough in this case.
+
+  // If we don't have regular_batch, it means that we are just removing intents, i.e. when a
+  // transaction has been aborted. We don't need the intent iterator in that case, because the
+  // reverse index iterator is sufficient.
   if (regular_batch) {
     intent_iter = CreateRocksDBIterator(
         intents_db, key_bounds, BloomFilterMode::DONT_USE_BLOOM_FILTER, boost::none,
         rocksdb::kDefaultQueryId);
   }
 
-  KeyBytes txn_reverse_index_prefix;
-  Slice transaction_id_slice(transaction_id.data, TransactionId::static_size());
-  AppendTransactionKeyPrefix(transaction_id, &txn_reverse_index_prefix);
-
-  KeyBytes txn_reverse_index_upperbound = txn_reverse_index_prefix;
-  txn_reverse_index_upperbound.AppendValueType(ValueType::kMaxByte);
-  reverse_index_upperbound = txn_reverse_index_upperbound.AsSlice();
-
-  reverse_index_iter.Seek(txn_reverse_index_prefix.data());
+  reverse_index_iter.Seek(key_prefix);
 
   DocHybridTimeBuffer doc_ht_buffer;
+
+  const auto& log_prefix = intents_db->GetOptions().log_prefix;
 
   IntraTxnWriteId write_id = 0;
   while (reverse_index_iter.Valid()) {
     rocksdb::Slice key_slice(reverse_index_iter.key());
 
-    if (!key_slice.starts_with(txn_reverse_index_prefix.data())) {
+    if (!key_slice.starts_with(key_prefix)) {
       break;
     }
 
-    VLOG(4) << "Apply reverse index record: "
-            << EntryToString(reverse_index_iter, StorageDbType::kIntents);
+    VLOG(4) << log_prefix << "Apply reverse index record to ["
+            << (regular_batch ? "R" : "") << (intents_batch ? "I" : "")
+            << "]: " << EntryToString(reverse_index_iter, StorageDbType::kIntents);
 
     // If the key ends at the transaction id then it is transaction metadata (status tablet,
     // isolation level etc.).
     if (key_slice.size() > txn_reverse_index_prefix.size()) {
+      auto reverse_index_value = reverse_index_iter.value();
+      if (!reverse_index_value.empty() && reverse_index_value[0] == ValueTypeAsChar::kBitSet) {
+        CHECK(!FLAGS_TEST_fail_on_replicated_batch_idx_set_in_txn_record);
+        reverse_index_value.remove_prefix(1);
+        RETURN_NOT_OK(OneWayBitmap::Skip(&reverse_index_value));
+      }
+
       // Value of reverse index is a key of original intent record, so seek it and check match.
       if (regular_batch &&
           (!key_bounds || key_bounds->IsWithinBounds(reverse_index_iter.value()))) {
         RETURN_NOT_OK(IntentToWriteRequest(
-            transaction_id_slice, commit_ht, &reverse_index_iter, &intent_iter,
-            regular_batch, &write_id));
+            transaction_id_slice, commit_ht, reverse_index_iter.key(), reverse_index_value,
+            &intent_iter, regular_batch, &write_id));
       }
 
       if (intents_batch) {
-        intents_batch->Delete(reverse_index_iter.value());
+        intents_batch->SingleDelete(reverse_index_value);
       }
     }
 
     if (intents_batch) {
-      intents_batch->Delete(reverse_index_iter.key());
+      intents_batch->SingleDelete(reverse_index_iter.key());
     }
 
     reverse_index_iter.Next();

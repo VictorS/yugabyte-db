@@ -6,14 +6,15 @@ import { Panel } from 'react-bootstrap';
 import { MetricsPanel } from '../../metrics';
 import './GraphPanel.scss';
 import { YBLoading } from '../../common/indicators';
-import { isNonEmptyObject, isEmptyObject, isNonEmptyArray, isEmptyArray, isNonEmptyString } from 'utils/ObjectUtils';
-import { isKubernetesUniverse } from 'utils/UniverseUtils';
+import { isNonEmptyObject, isEmptyObject, isNonEmptyArray, isEmptyArray, isNonEmptyString } from '../../../utils/ObjectUtils';
+import { isKubernetesUniverse } from '../../../utils/UniverseUtils';
 
 const panelTypes = {
   container: {title: "Container",
     metrics: ["container_cpu_usage",
       "container_memory_usage",
-      "container_volume_stats"]},
+      "container_volume_stats"
+    ]},
   server: {title: "Node",
     metrics: ["cpu_usage",
       "memory_usage",
@@ -42,7 +43,24 @@ const panelTypes = {
       "tserver_tc_malloc_stats",
       "tserver_log_stats",
       "tserver_cache_reader_num_ops",
-      "tserver_glog_info_messages"]},
+      "tserver_glog_info_messages",
+      "tserver_rpc_queue_size_tserver",
+      "tserver_cpu_util_secs",
+      "tserver_yb_rpc_connections"
+    ]},
+  master: {title: "Master Server",
+    metrics: [
+      "master_overall_rpc_rate",
+      "master_get_tablet_location",
+      "master_tsservice_reads",
+      "master_tsservice_writes",
+      "master_ts_heartbeats",
+      "tserver_rpc_queue_size_master",
+      "master_consensus_update",
+      "master_table_ops",
+      "master_cpu_util_secs",
+      "master_yb_rpc_connections"
+    ]},
   lsmdb: {title: "DocDB",
     metrics: ["lsm_rocksdb_num_seek_or_next",
       "lsm_rocksdb_num_seeks_per_node",
@@ -56,22 +74,36 @@ const panelTypes = {
       "lsm_rocksdb_block_cache_usage",
       "lsm_rocksdb_blooms_checked_and_useful",
       "lsm_rocksdb_stalls",
+      "lsm_rocksdb_write_rejections",
       "lsm_rocksdb_flush_size",
       "lsm_rocksdb_compaction",
       "lsm_rocksdb_compaction_time",
       "lsm_rocksdb_compaction_numfiles",
-      "docdb_transaction"]},
-  proxies: {title: "Overall Ops and Latency",
-    metrics: ["ysql_server_rpc_per_second",
-      "ysql_sql_latency",
+      "docdb_transaction"
+    ]},
+  ysql_ops: {title: "YSQL Ops and Latency",
+    metrics: [
+      "ysql_server_rpc_per_second",
+      "ysql_sql_latency"
+      // TODO(bogdan): Add these in once we have histogram support, see #3630.
+      // "ysql_server_rpc_p99"
+    ]},
+  ycql_ops: {title: "YCQL Ops and Latency",
+    metrics: [
       "cql_server_rpc_per_second",
       "cql_sql_latency",
-      "redis_rpcs_per_sec_all",
-      "redis_ops_latency_all"
+      "cql_server_rpc_p99",
+      "tserver_async_replication_lag_micros"
     ]},
-
+  yedis_ops: {title: "YEDIS Ops and Latency",
+    metrics: [
+      "redis_rpcs_per_sec_all",
+      "redis_ops_latency_all",
+      "redis_server_rpc_p99"
+    ]},
   redis:  {title: "YEDIS Advanced",
     metrics: ["redis_yb_local_vs_remote_ops",
+      "tserver_rpc_queue_size_redis",
       "redis_yb_local_vs_remote_latency",
       "redis_reactor_latency",
       "redis_rpcs_per_sec_hash",
@@ -85,7 +117,8 @@ const panelTypes = {
       "redis_rpcs_per_sec_str",
       "redis_ops_latency_str",
       "redis_rpcs_per_sec_local",
-      "redis_ops_latency_local"
+      "redis_ops_latency_local",
+      "redis_yb_rpc_connections"
     ]},
 
   cql:  {title: "YCQL Advanced",
@@ -93,39 +126,11 @@ const panelTypes = {
       "cql_yb_local_vs_remote",
       "cql_yb_latency",
       "cql_reactor_latency",
-      "cql_yb_rpc_connections",
+      "tserver_rpc_queue_size_cql",
       "response_sizes",
-      "cql_yb_transaction"]},
-
-  tserver_table: {
-    title: "Tablet Server",
-    metrics: ["tserver_log_latency",
-      "tserver_log_bytes_written",
-      "tserver_log_bytes_read",
-      "tserver_log_ops_second",
-      "tserver_log_stats",
-      "tserver_cache_reader_num_ops",
-      "tserver_glog_info_messages"]
-  },
-
-  lsmdb_table: {
-    title: "DocDB",
-    metrics: ["lsm_rocksdb_num_seek_or_next",
-      "lsm_rocksdb_num_seeks_per_node",
-      "lsm_rocksdb_total_sst_per_node",
-      "lsm_rocksdb_avg_num_sst_per_node",
-      "lsm_rocksdb_latencies_get",
-      "lsm_rocksdb_latencies_write",
-      "lsm_rocksdb_latencies_seek",
-      "lsm_rocksdb_block_cache_hit_miss",
-      "lsm_rocksdb_blooms_checked_and_useful",
-      "lsm_rocksdb_stalls",
-      "lsm_rocksdb_flush_size",
-      "lsm_rocksdb_compaction",
-      "lsm_rocksdb_compaction_time",
-      "lsm_rocksdb_compaction_numfiles",
-      "docdb_transaction"]
-  }
+      "cql_yb_transaction",
+      "cql_yb_rpc_connections"
+    ]}
 };
 
 class GraphPanel extends Component {
@@ -133,6 +138,7 @@ class GraphPanel extends Component {
     super(props);
     this.state = {isOpen: false, ...this.props};
   }
+
   static propTypes = {
     type: PropTypes.oneOf(Object.keys(panelTypes)).isRequired,
     nodePrefixes: PropTypes.array
@@ -145,17 +151,6 @@ class GraphPanel extends Component {
   componentDidMount() {
     if(this.state.isOpen) {
       this.queryMetricsType(this.props.graph.graphFilter);
-    }
-  }
-
-  componentWillReceiveProps(nextProps) {
-    // Perform metric query only if the graph filter has changed.
-    // TODO: add the nodePrefixes to the queryParam
-    if(nextProps.graph.graphFilter !== this.props.graph.graphFilter) {
-      this.props.resetMetrics();
-      if(this.state.isOpen) {
-        this.queryMetricsType(nextProps.graph.graphFilter);
-      }
     }
   }
 
@@ -188,6 +183,14 @@ class GraphPanel extends Component {
   }
 
   componentDidUpdate(prevProps, prevState) {
+    // Perform metric query only if the graph filter has changed.
+    // TODO: add the nodePrefixes to the queryParam
+    if(prevProps.graph.graphFilter !== this.props.graph.graphFilter) {
+      if(this.state.isOpen) {
+        this.queryMetricsType(this.props.graph.graphFilter);
+      }
+    }
+
     const { type, graph: { metrics }} = this.props;
     if(!prevState.isOpen && this.state.isOpen && (Object.keys(metrics).length === 0 || isEmptyObject(metrics[type]))) {
       this.queryMetricsType(this.props.graph.graphFilter);
@@ -199,9 +202,10 @@ class GraphPanel extends Component {
 
     let panelData = <YBLoading />;
 
-    if (insecureLoginToken && type !== 'proxies') {
+    if (insecureLoginToken &&
+        !(type === 'ycql_ops' || type === 'ysql_ops' || type === 'yedis_ops')) {
       panelData = (<div className="oss-unavailable-warning">
-        Only available on YugaByte Platform.
+        Only available on Yugabyte Platform.
       </div>);
     } else {
       if (Object.keys(metrics).length > 0 && isNonEmptyObject(metrics[type])) {

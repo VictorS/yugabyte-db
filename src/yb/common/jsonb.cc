@@ -15,6 +15,8 @@
 
 #include "yb/common/jsonb.h"
 #include "yb/common/json_util.h"
+#include "yb/common/ql_value.h"
+
 #include "yb/util/kv_util.h"
 #include "yb/util/stol_utils.h"
 #include "yb/util/varint.h"
@@ -35,12 +37,20 @@ size_t Jsonb::ComputeDataOffset(const size_t num_entries, const uint32_t contain
 Jsonb::Jsonb() {
 }
 
-Jsonb::Jsonb(const std::string& jsonb) :
-  serialized_jsonb_(jsonb) {
+Jsonb::Jsonb(const std::string& jsonb)
+    : serialized_jsonb_(jsonb) {
 }
 
-Jsonb::Jsonb(std::string&& jsonb) :
-    serialized_jsonb_(std::move(jsonb)) {
+Jsonb::Jsonb(std::string&& jsonb)
+    : serialized_jsonb_(std::move(jsonb)) {
+}
+
+void Jsonb::Assign(const std::string& jsonb) {
+  serialized_jsonb_ = jsonb;
+}
+
+void Jsonb::Assign(std::string&& jsonb) {
+  serialized_jsonb_ = std::move(jsonb);
 }
 
 std::string&& Jsonb::MoveSerializedJsonb() {

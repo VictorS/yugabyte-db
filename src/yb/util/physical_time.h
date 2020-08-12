@@ -21,10 +21,15 @@
 namespace yb {
 
 using MicrosTime = uint64_t;
+using MillisTime = uint64_t;
 
 struct PhysicalTime {
   MicrosTime time_point;
   MicrosTime max_error;
+
+  std::string ToString() const {
+    return Format("{ time_point: $0 max_error: $1 }", time_point, max_error);
+  }
 };
 
 class PhysicalClock {
@@ -35,7 +40,7 @@ class PhysicalClock {
 };
 
 typedef std::shared_ptr<PhysicalClock> PhysicalClockPtr;
-typedef std::function<PhysicalClockPtr()> PhysicalClockProvider;
+typedef std::function<PhysicalClockPtr(const std::string&)> PhysicalClockProvider;
 
 // Clock with user controlled return values.
 class MockClock : public PhysicalClock {

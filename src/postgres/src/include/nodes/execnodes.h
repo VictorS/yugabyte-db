@@ -142,6 +142,7 @@ typedef struct ExprState
  *		Am					Oid of index AM
  *		AmCache				private cache area for index AM
  *		Context				memory context holding this IndexInfo
+ *		SplitOptions		Options to split index into tablets. 
  *
  * ii_Concurrent, ii_BrokenHotChain, and ii_ParallelWorkers are used only
  * during index build; they're conventionally zeroed otherwise.
@@ -207,7 +208,7 @@ typedef struct ExprContext_CB
  *	  before we begin to evaluate expressions for that tuple.  Each
  *	  ExprContext normally has its very own per-tuple memory context.
  *
- *	CurrentMemoryContext should be set to ecxt_per_tuple_memory before
+ *	GetCurrentMemoryContext() should be set to ecxt_per_tuple_memory before
  *	calling ExecEvalExpr() --- see ExecEvalExprSwitchContext().
  * ----------------
  */
@@ -579,7 +580,10 @@ typedef struct EState
 	struct JitContext *es_jit;
 	struct JitInstrumentation *es_jit_worker_instr;
 
-	/* YugaByte-specific fields */
+	/*
+	 * YugaByte-specific fields
+	 */
+
 	bool es_yb_is_single_row_modify_txn; /* Is this query a single-row modify
 																				* and the only stmt in this txn. */
 	TupleTableSlot *yb_conflict_slot; /* If a conflict is to be resolved when inserting data,
@@ -1082,7 +1086,6 @@ typedef struct ModifyTableState
 
 	/* YB specific attributes. */
 	bool yb_mt_is_single_row_update_or_delete;
-	Bitmapset *yb_mt_update_attrs;
 } ModifyTableState;
 
 /* ----------------

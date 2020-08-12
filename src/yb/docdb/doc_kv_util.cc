@@ -18,12 +18,13 @@
 #include "yb/docdb/value.h"
 #include "yb/rocksutil/yb_rocksdb.h"
 #include "yb/server/hybrid_clock.h"
+#include "yb/util/bytes_formatter.h"
 
 using std::string;
 
 using strings::Substitute;
 using yb::HybridTime;
-using yb::util::FormatBytesAsStr;
+using yb::FormatBytesAsStr;
 
 namespace yb {
 namespace docdb {
@@ -74,7 +75,7 @@ Status CheckHybridTimeSizeAndValueType(
 }
 
 template <char END_OF_STRING>
-void AppendEncodedStrToKey(const string &s, string *dest) {
+void AppendEncodedStrToKey(const string &s, KeyBuffer *dest) {
   static_assert(END_OF_STRING == '\0' || END_OF_STRING == '\xff',
                 "Only characters '\0' and '\xff' allowed as a template parameter");
   if (END_OF_STRING == '\0' && s.find('\0') == string::npos) {
@@ -92,25 +93,25 @@ void AppendEncodedStrToKey(const string &s, string *dest) {
   }
 }
 
-void AppendZeroEncodedStrToKey(const string &s, string *dest) {
+void AppendZeroEncodedStrToKey(const string &s, KeyBuffer *dest) {
   AppendEncodedStrToKey<'\0'>(s, dest);
 }
 
-void AppendComplementZeroEncodedStrToKey(const string &s, string *dest) {
+void AppendComplementZeroEncodedStrToKey(const string &s, KeyBuffer *dest) {
   AppendEncodedStrToKey<'\xff'>(s, dest);
 }
 
 template <char A>
-inline void TerminateEncodedKeyStr(string *dest) {
+inline void TerminateEncodedKeyStr(KeyBuffer *dest) {
   dest->push_back(A);
   dest->push_back(A);
 }
 
-void TerminateZeroEncodedKeyStr(string *dest) {
+void TerminateZeroEncodedKeyStr(KeyBuffer *dest) {
   TerminateEncodedKeyStr<'\0'>(dest);
 }
 
-void TerminateComplementZeroEncodedKeyStr(string *dest) {
+void TerminateComplementZeroEncodedKeyStr(KeyBuffer *dest) {
   TerminateEncodedKeyStr<'\xff'>(dest);
 }
 
@@ -186,7 +187,7 @@ string DecodeZeroEncodedStr(string encoded_str) {
 }
 
 std::string ToShortDebugStr(rocksdb::Slice slice) {
-  return yb::FormatRocksDBSliceAsStr(slice, kShortDebugStringLength);
+  return FormatSliceAsStr(slice, QuotesType::kDoubleQuotes, kShortDebugStringLength);
 }
 
 }  // namespace docdb

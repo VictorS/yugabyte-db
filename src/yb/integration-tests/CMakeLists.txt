@@ -53,6 +53,7 @@ target_link_libraries(integration-tests
   master
   ql_api
   ysck
+  yb-admin_lib
   yb_client
   yb_client_test_util
   yb_fs
@@ -66,9 +67,15 @@ add_dependencies(integration-tests
   yb-tserver
   yb-master)
 
+add_library(cdc_test_util cdc_test_util.cc)
+target_link_libraries(cdc_test_util yb_test_util cdc_service_proto tserver)
+
+add_library(cql_test_util cql_test_base.cc cql_test_util.cc)
+target_link_libraries(cql_test_util cassandra integration-tests yb-cql yb_test_util)
+
 # Tests
 set(YB_TEST_LINK_LIBS
-    integration-tests yb_client yb_tools_util ql-dml-test-base ${YB_MIN_TEST_LIBS})
+    integration-tests yb_client yb_tools_util ql-dml-test-base rpc_test_util ${YB_MIN_TEST_LIBS})
 
 ADD_YB_TEST(alter_table-test)
 ADD_YB_TEST(alter_table-randomized-test)
@@ -77,6 +84,8 @@ ADD_YB_TEST(clock_synchronization-itest)
 ADD_YB_TEST(client_failover-itest)
 ADD_YB_TEST(client-stress-test)
 ADD_YB_TEST(cluster_trace-test)
+ADD_YB_TEST(tablet_server-itest)
+ADD_YB_TEST(tablet-split-itest)
 # Tests which fail on purpose for checking Jenkins test failures reporting, disabled
 # (commented out) by default:
 # ADD_YB_TEST(test_failures-test)
@@ -84,6 +93,7 @@ ADD_YB_TEST(cluster_trace-test)
 
 # Not sure if we really need RUN_SERIAL here as this might not be a resource-intensive test.
 ADD_YB_TEST(compaction-test)
+ADD_YB_TEST(logging-test)
 ADD_YB_TEST(master_replication-itest)
 ADD_YB_TEST(master_sysnamespace-itest)
 ADD_YB_TEST(master_path_handlers-itest)
@@ -113,15 +123,33 @@ ADD_YB_TEST(full_stack-insert-scan-test)
 ADD_YB_TEST(redis_table-test)
 ADD_YB_TEST(update_scan_delta_compact-test)
 ADD_YB_TEST(log_version-test)
+ADD_YB_TEST(load_balancer-test)
+ADD_YB_TEST(load_balancer_multi_table-test)
+ADD_YB_TEST(load_balancer_respect_affinity-test)
 
 set(YB_TEST_LINK_LIBS_SAVED ${YB_TEST_LINK_LIBS})
-set(YB_TEST_LINK_LIBS ${YB_TEST_LINK_LIBS} cassandra)
+set(YB_TEST_LINK_LIBS ${YB_TEST_LINK_LIBS} cassandra cql_test_util)
 set(CASS_DRIVER_VERSION "2.9.0-yb-4")
-set(CASS_DRIVER_INTERNAL_INCLUDE "${YB_THIRDPARTY_DIR}/src/cassandra-cpp-driver-${CASS_DRIVER_VERSION}/src")
+set(CASS_DRIVER_INTERNAL_INCLUDE
+    "${YB_THIRDPARTY_DIR}/src/cassandra-cpp-driver-${CASS_DRIVER_VERSION}/src")
+
 ADD_YB_TEST(cassandra_cpp_driver-test)
 target_include_directories(cassandra_cpp_driver-test PUBLIC
   ${CASS_DRIVER_INTERNAL_INCLUDE}
   "${CASS_DRIVER_INTERNAL_INCLUDE}/third_party/sparsehash/src")
+
+if("${COMPILER_FAMILY}" STREQUAL "gcc8")
+  target_compile_options(cassandra_cpp_driver-test PUBLIC "-Wno-class-memaccess")
+endif()
+
+ADD_YB_TEST(cql-index-test)
+target_include_directories(cql-index-test PUBLIC ${CASS_DRIVER_INTERNAL_INCLUDE})
+target_link_libraries(cql-index-test yb-cql)
+
+ADD_YB_TEST(cql-test)
+target_include_directories(cql-test PUBLIC ${CASS_DRIVER_INTERNAL_INCLUDE})
+target_link_libraries(cql-test yb-cql)
+
 set(YB_TEST_LINK_LIBS ${YB_TEST_LINK_LIBS_SAVED})
 
 # Additional tests

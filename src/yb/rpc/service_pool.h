@@ -48,6 +48,9 @@
 
 namespace yb {
 
+template<class T>
+class AtomicGauge;
+
 class Counter;
 class Histogram;
 class MetricEntity;
@@ -75,6 +78,7 @@ class ServicePool : public RpcService {
   const Counter* RpcsQueueOverflowMetric() const;
   std::string service_name() const;
 
+  ServiceIfPtr TEST_get_service() const;
  private:
   std::unique_ptr<ServicePoolImpl> impl_;
 };

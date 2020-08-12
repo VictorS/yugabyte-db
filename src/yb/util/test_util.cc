@@ -39,7 +39,6 @@
 #include "yb/gutil/strings/substitute.h"
 #include "yb/gutil/strings/util.h"
 #include "yb/gutil/walltime.h"
-#include "yb/rpc/messenger.h"
 #include "yb/util/env.h"
 #include "yb/util/path_util.h"
 #include "yb/util/random.h"
@@ -54,7 +53,7 @@ DEFINE_string(test_leave_files, "on_failure",
 DEFINE_int32(test_random_seed, 0, "Random seed to use for randomized tests");
 DECLARE_int64(memory_limit_hard_bytes);
 DECLARE_bool(enable_tracing);
-DECLARE_bool(running_test);
+DECLARE_bool(TEST_running_test);
 
 using std::string;
 using strings::Substitute;
@@ -105,7 +104,7 @@ void YBTest::SetUp() {
   InitGoogleLoggingSafeBasic("yb_test");
   FLAGS_enable_tracing = true;
   FLAGS_memory_limit_hard_bytes = 8 * 1024 * 1024 * 1024L;
-  FLAGS_running_test = true;
+  FLAGS_TEST_running_test = true;
   for (const char* env_var_name : {
       "ASAN_OPTIONS",
       "LSAN_OPTIONS",
@@ -318,17 +317,17 @@ Status LoggedWaitFor(
     MonoDelta initial_delay,
     double delay_multiplier,
     MonoDelta max_delay) {
-  LOG(INFO) << description;
+  LOG(INFO) << description << " - started";
   auto status = WaitFor(condition, timeout, description, initial_delay);
   LOG(INFO) << description << " - completed: " << yb::ToString(status);
   return status;
 }
 
-string GetToolPath(const string& tool_name) {
+string GetToolPath(const string& rel_path, const string& tool_name) {
   string exe;
   CHECK_OK(Env::Default()->GetExecutablePath(&exe));
-  string binroot = DirName(exe) + "/../bin/";
-  string tool_path = JoinPathSegments(binroot, tool_name);
+  const string binroot = JoinPathSegments(DirName(exe), rel_path);
+  const string tool_path = JoinPathSegments(binroot, tool_name);
   CHECK(Env::Default()->FileExists(tool_path)) << tool_name << " tool not found at " << tool_path;
   return tool_path;
 }
@@ -350,14 +349,16 @@ void WaitStopped(const CoarseDuration& duration, std::atomic<bool>* stop) {
   }
 }
 
-void MessengerShutdownDeleter::operator()(rpc::Messenger* messenger) const {
-  messenger->Shutdown();
-  delete messenger;
-}
+void TestThreadHolder::JoinAll() {
+  LOG(INFO) << __func__;
 
-AutoShutdownMessengerHolder CreateAutoShutdownMessengerHolder(
-    std::unique_ptr<rpc::Messenger>&& messenger) {
-  return AutoShutdownMessengerHolder(move(messenger).release());
+  for (auto& thread : threads_) {
+    if (thread.joinable()) {
+      thread.join();
+    }
+  }
+
+  LOG(INFO) << __func__ << " done";
 }
 
 } // namespace yb

@@ -15,6 +15,7 @@
 #define ENT_SRC_YB_TSERVER_CDC_CONSUMER_H
 
 #include <unordered_map>
+#include <unordered_set>
 
 #include "yb/cdc/cdc_util.h"
 #include "yb/util/locks.h"
@@ -26,13 +27,15 @@ class ThreadPool;
 
 namespace rpc {
 
+class Messenger;
 class ProxyCache;
+class Rpcs;
+class SecureContext;
 
 } // namespace rpc
 
 namespace cdc {
 
-class CDCConsumerProxyManager;
 class ConsumerRegistryPB;
 
 } // namespace cdc
@@ -49,6 +52,16 @@ namespace enterprise {
 class CDCPoller;
 class TabletServer;
 
+struct CDCClient {
+  std::unique_ptr<rpc::Messenger> messenger;
+  std::unique_ptr<rpc::SecureContext> secure_context;
+  std::shared_ptr<client::YBClient> client;
+  std::shared_ptr<rpc::Rpcs> rpcs = std::make_shared<rpc::Rpcs>();
+
+  ~CDCClient();
+  void Shutdown();
+};
+
 class CDCConsumer {
  public:
   static Result<std::unique_ptr<CDCConsumer>> Create(
@@ -59,7 +72,7 @@ class CDCConsumer {
   CDCConsumer(std::function<bool(const std::string&)> is_leader_for_tablet,
       rpc::ProxyCache* proxy_cache,
       const std::string& ts_uuid,
-      std::unique_ptr<client::YBClient> client);
+      std::unique_ptr<CDCClient> local_client);
 
   ~CDCConsumer();
   void Shutdown();
@@ -76,6 +89,14 @@ class CDCConsumer {
   // we don't need to hold the mutex.
   int32_t cluster_config_version() const NO_THREAD_SAFETY_ANALYSIS;
 
+  void IncrementNumSuccessfulWriteRpcs() {
+    TEST_num_successful_write_rpcs++;
+  }
+
+  uint32_t GetNumSuccessfulWriteRpcs() {
+    return TEST_num_successful_write_rpcs.load(std::memory_order_acquire);
+  }
+
  private:
   // Runs a thread that periodically polls for any new threads.
   void RunThread();
@@ -89,39 +110,52 @@ class CDCConsumer {
   // polled for.
   void TriggerPollForNewTablets();
 
-  bool ShouldContinuePolling(const cdc::ProducerTabletInfo& producer_tablet_info);
+  bool ShouldContinuePolling(const cdc::ProducerTabletInfo producer_tablet_info);
 
-  void RemoveFromPollersMap(const cdc::ProducerTabletInfo& producer_tablet_info);
-
-  // Mutex for producer_consumer_tablet_map_from_master_.
-  rw_spinlock master_data_mutex_;
-
-  // Mutex for producer_pollers_map_.
-  rw_spinlock producer_pollers_map_mutex_;
+  void RemoveFromPollersMap(const cdc::ProducerTabletInfo producer_tablet_info);
 
   // Mutex and cond for should_run_ state.
   std::mutex should_run_mutex_;
   std::condition_variable cond_;
 
+  // Mutex for producer_consumer_tablet_map_from_master_.
+  rw_spinlock master_data_mutex_ ACQUIRED_AFTER(should_run_mutex_);
+
+  // Mutex for producer_pollers_map_.
+  rw_spinlock producer_pollers_map_mutex_ ACQUIRED_AFTER(should_run_mutex_, master_data_mutex_);
+
   std::function<bool(const std::string&)> is_leader_for_tablet_;
-  std::unique_ptr<cdc::CDCConsumerProxyManager> proxy_manager_;
 
   std::unordered_map<cdc::ProducerTabletInfo, cdc::ConsumerTabletInfo,
-                     cdc::ProducerTabletInfo::Hash> producer_consumer_tablet_map_from_master_;
+                     cdc::ProducerTabletInfo::Hash> producer_consumer_tablet_map_from_master_
+                     GUARDED_BY(master_data_mutex_);
+
+  std::unordered_set<std::string> streams_with_same_num_producer_consumer_tablets_
+    GUARDED_BY(master_data_mutex_);
 
   scoped_refptr<Thread> run_trigger_poll_thread_;
 
   std::unordered_map<cdc::ProducerTabletInfo, std::shared_ptr<CDCPoller>,
-                     cdc::ProducerTabletInfo::Hash> producer_pollers_map_;
+                     cdc::ProducerTabletInfo::Hash> producer_pollers_map_
+                     GUARDED_BY(producer_pollers_map_mutex_);
 
   std::unique_ptr<ThreadPool> thread_pool_;
 
   std::string log_prefix_;
-  std::shared_ptr<client::YBClient> client_;
+  std::shared_ptr<CDCClient> local_client_;
+
+  // map: {universe_uuid : ...}.
+  std::unordered_map<std::string, std::shared_ptr<CDCClient>> remote_clients_
+    GUARDED_BY(producer_pollers_map_mutex_);
+  std::unordered_map<std::string, std::string> uuid_master_addrs_
+    GUARDED_BY(master_data_mutex_);
+  std::unordered_set<std::string> changed_master_addrs_ GUARDED_BY(master_data_mutex_);
 
   bool should_run_ = true;
 
   std::atomic<int32_t> cluster_config_version_ GUARDED_BY(master_data_mutex_) = {-1};
+
+  std::atomic<uint32_t> TEST_num_successful_write_rpcs {0};
 };
 
 } // namespace enterprise

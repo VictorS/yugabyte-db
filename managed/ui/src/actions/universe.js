@@ -92,15 +92,26 @@ export const FETCH_UNIVERSE_BACKUPS = 'FETCH_UNIVERSE_BACKUPS';
 export const FETCH_UNIVERSE_BACKUPS_RESPONSE = 'FETCH_UNIVERSE_BACKUPS_RESPONSE';
 export const RESET_UNIVERSE_BACKUPS = 'RESET_UNIVERSE_BACKUPS';
 
+export const CREATE_UNIVERSE_BACKUP = 'CREATE_UNIVERSE_BACKUP';
+export const CREATE_UNIVERSE_BACKUP_RESPONSE = 'CREATE_UNIVERSE_BACKUP_RESPONSE';
+
 // Health Checking for Universe
 export const GET_HEALTH_CHECK = 'GET_HEALTH_CHECK';
 export const GET_HEALTH_CHECK_RESPONSE = 'GET_HEALTH_CHECK_RESPONSE';
+
+export const SET_ENCRYPTION_KEY = 'SET_ENCRYPTION_KEY';
+export const SET_ENCRYPTION_KEY_RESPONSE = 'SET_ENCRYPTION_KEY_RESPONSE';
 
 export const IMPORT_UNIVERSE = 'IMPORT_UNIVERSE';
 export const IMPORT_UNIVERSE_INIT = 'IMPORT_UNIVERSE_INIT';
 export const IMPORT_UNIVERSE_RESPONSE = 'IMPORT_UNIVERSE_RESPONSE';
 export const IMPORT_UNIVERSE_RESET = 'IMPORT_UNIVERSE_RESET';
 
+export const SET_ALERTS_CONFIG = 'SET_ALERTS_CONFIG';
+export const SET_ALERTS_CONFIG_RESPONSE = 'SET_ALERTS_CONFIG_RESPONSE';
+
+export const UPDATE_BACKUP_STATE = 'UPDATE_BACKUP_STATE';
+export const UPDATE_BACKUP_STATE_RESPONSE = 'UPDATE_BACKUP_STATE_RESPONSE';
 
 export function createUniverse(formValues) {
   const customerUUID = localStorage.getItem("customerId");
@@ -497,6 +508,25 @@ export function resetUniverseBackups() {
   };
 }
 
+export function createUniverseBackup(universeUUID, formValues) {
+  const cUUID = localStorage.getItem("customerId");
+  const request = axios.put(
+    `${ROOT_URL}/customers/${cUUID}/universes/${universeUUID}/multi_table_backup`,
+    formValues
+  );
+  return {
+    type: CREATE_UNIVERSE_BACKUP,
+    payload: request
+  };
+}
+
+export function createUniverseBackupResponse(response) {
+  return {
+    type: CREATE_UNIVERSE_BACKUP_RESPONSE,
+    payload: response
+  };
+}
+
 export function getHealthCheck(universeUUID) {
   const customerUUID = localStorage.getItem("customerId");
   const request = axios.get(`${ROOT_URL}/customers/${customerUUID}/universes/${universeUUID}/health_check`);
@@ -509,6 +539,23 @@ export function getHealthCheck(universeUUID) {
 export function getHealthCheckResponse(response) {
   return {
     type: GET_HEALTH_CHECK_RESPONSE,
+    payload: response
+  };
+}
+
+export function setEncryptionKey(universeUUID, data) {
+  const customerUUID = localStorage.getItem("customerId");
+  const endpoint = `${ROOT_URL}/customers/${customerUUID}/universes/${universeUUID}/set_key`;
+  const request = axios.post(endpoint, data);
+  return {
+    type: SET_ENCRYPTION_KEY,
+    payload: request
+  };
+}
+
+export function setEncryptionKeyResponse(response) {
+  return {
+    type: SET_ENCRYPTION_KEY_RESPONSE,
     payload: response
   };
 }
@@ -538,5 +585,40 @@ export function importUniverseResponse(response) {
 export function importUniverseReset() {
   return {
     type: IMPORT_UNIVERSE_RESET
+  };
+}
+
+export function setAlertsConfig(universeUUID, data) {
+  const customerUUID = localStorage.getItem("customerId");
+  const endpoint = `${ROOT_URL}/customers/${customerUUID}/universes/${universeUUID}/config_alerts`;
+  const request = axios.post(endpoint, data);
+  return {
+    type: SET_ALERTS_CONFIG,
+    payload: request
+  };
+}
+
+export function setAlertsConfigResponse(response) {
+  return {
+    type: SET_ALERTS_CONFIG_RESPONSE,
+    payload: response
+  };
+}
+
+export function updateBackupState(universeUUID, flag) {
+  const customerUUID = localStorage.getItem("customerId");
+  const endpoint = `${ROOT_URL}/customers/${customerUUID}/universes/${universeUUID}/update_backup_state?markActive=${flag}`;
+  const request = axios.put(endpoint);
+
+  return {
+    type: UPDATE_BACKUP_STATE,
+    payload: request
+  };
+}
+
+export function updateBackupStateResponse(response) {
+  return {
+    type: UPDATE_BACKUP_STATE_RESPONSE,
+    payload: response
   };
 }

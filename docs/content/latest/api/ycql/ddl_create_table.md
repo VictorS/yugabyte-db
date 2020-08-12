@@ -1,7 +1,8 @@
 ---
-title: CREATE TABLE
-summary: Create a new table in a keyspace
-description: CREATE TABLE
+title: CREATE TABLE statement [YCQL]
+headerTitle: CREATE TABLE
+linkTitle: CREATE TABLE
+description: Use the CREATE TABLE statement to create a new table in a keyspace.
 menu:
   latest:
     parent: api-cassandra
@@ -15,7 +16,7 @@ showAsideToc: true
 
 ## Synopsis
 
-The `CREATE TABLE` statement is used to create a new table in a keyspace. It defines the table name, column names and types, primary key, and table properties.
+Use the `CREATE TABLE` statement to create a new table in a keyspace. It defines the table name, column names and types, primary key, and table properties.
 
 ## Syntax
 
@@ -38,7 +39,7 @@ The `CREATE TABLE` statement is used to create a new table in a keyspace. It def
 ```
 create_table ::= CREATE TABLE [ IF NOT EXISTS ] table_name
                      '(' table_element [ ',' table_element ...] ')'
-                     [ table_option [ AND table_option ] ];
+                     [WITH table_properties];
 
 table_element ::= table_column | table_constraints
 
@@ -52,13 +53,14 @@ partition_key_column_list ::= '(' column_name [ ',' column_name ...] ')' | colum
 
 clustering_key_column_list ::= [ ',' column_name ...]
 
-table_option ::= WITH table_property [ AND table_property ...]
+table_properties = [table_options]
+                    [[AND] CLUSTERING ORDER BY '(' column_ordering_property [ ',' column_ordering_property ...] ')']
+                    [[AND] COMPACT STORAGE]
 
-table_property ::= { property_name = property_literal
-                     | CLUSTERING ORDER BY '(' column_ordering_property [ ',' column_ordering_property ...] ')'
-                     | COMPACT STORAGE }
+table_options = property_name '=' property_literal [AND property_name '=' property_literal ...]
 
 column_ordering_property ::= column_name [ ASC | DESC ]
+
 ```
 
 Where
@@ -82,34 +84,37 @@ Where
 
 #### PARTITION KEY
 
- - Partition key is required and defines a split of rows into _partitions_.
- - Rows that share the same partition key form a partition and will be colocated on the same replica node.
+- Partition key is required and defines a split of rows into _partitions_.
+- Rows that share the same partition key form a partition and will be colocated on the same replica node.
 
 #### CLUSTERING KEY
 
- - Clustering key is optional and defines an ordering for rows within a partition.
- - Default ordering is ascending (`ASC`) but can be set for each clustering column as ascending or descending using the `CLUSTERING ORDER BY` table property.
+- Clustering key is optional and defines an ordering for rows within a partition.
+- Default ordering is ascending (`ASC`) but can be set for each clustering column as ascending or descending using the `CLUSTERING ORDER BY` table property.
 
 ### STATIC COLUMNS
 
- - Columns declared as `STATIC` will share the same value for all rows within a partition (i.e. rows having the same partition key).
- - Columns in the primary key cannot be static.
- - A table without clustering columns cannot have static columns (without clustering columns the primary key and the partition key are identical so static columns would be the same as regular columns).
+- Columns declared as `STATIC` will share the same value for all rows within a partition (i.e. rows having the same partition key).
+- Columns in the primary key cannot be static.
+- A table without clustering columns cannot have static columns (without clustering columns the primary key and the partition key are identical so static columns would be the same as regular columns).
 
-### TABLE PROPERTIES
+### *table_properties*
 
- - The `CLUSTERING ORDER BY` property can be used to set the ordering for each clustering column individually (default is `ASC`).
- - The `default_time_to_live` property sets the default expiration time (TTL) in seconds for a table. The expiration time can be overridden by setting TTL for individual rows. The default value is `0` and means rows do not expire.
- - The `transactions` property specifies if distributed transactions are enabled in the table. To enable distributed transactions, use `transactions = { 'enabled' : true }`.
- - The other CQL table properties are allowed in the syntax but are currently ignored internally (have no effect).
+- The `CLUSTERING ORDER BY` property can be used to set the ordering for each clustering column individually (default is `ASC`).
+- The `default_time_to_live` property sets the default expiration time (TTL) in seconds for a table. The expiration time can be overridden by setting TTL for individual rows. The default value is `0` and means rows do not expire.
+- The `transactions` property specifies if distributed transactions are enabled in the table. To enable distributed transactions, use `transactions = { 'enabled' : true }`.
+- Use the `AND` operator to use multiple table properties.
+- The other YCQL table properties are allowed in the syntax but are currently ignored internally (have no effect).
+- The `TABLETS = <num>` property specifies the number of tablets to be used for the specified YCQL table. Setting this property overrides the value from the [`--yb_num_shards_per_tserver`](../../../reference/configuration/yb-tserver/#yb-num-shards-per-tserver) option. For an example, see [Create a table specifying the number of tablets](#create-a-table-specifying-the-number-of-tablets).
 
 ## Examples
 
 ### Use column constraint to define primary key
+
  'user_id' is the partitioning column and there are no clustering columns.
 
 ```sql
-cqlsh:example> CREATE TABLE users(user_id INT PRIMARY KEY, full_name TEXT);
+ycqlsh:example> CREATE TABLE users(user_id INT PRIMARY KEY, full_name TEXT);
 ```
 
 ### Use table constraint to define primary key
@@ -117,19 +122,19 @@ cqlsh:example> CREATE TABLE users(user_id INT PRIMARY KEY, full_name TEXT);
 'supplier_id' and 'device_id' are the partitioning columns and 'model_year' is the clustering column.
 
 ```sql
-cqlsh:example> CREATE TABLE devices(supplier_id INT,
+ycqlsh:example> CREATE TABLE devices(supplier_id INT,
                                     device_id INT,
                                     model_year INT,
                                     device_name TEXT,
                                     PRIMARY KEY((supplier_id, device_id), model_year));
 ```
 
-### Use column constraint to define a static column.
+### Use column constraint to define a static column
 
 You can do this as shown below.
 
 ```sql
-cqlsh:example> CREATE TABLE items(supplier_id INT,
+ycqlsh:example> CREATE TABLE items(supplier_id INT,
                                   item_id INT,
                                   supplier_name TEXT STATIC,
                                   item_name TEXT,
@@ -137,17 +142,17 @@ cqlsh:example> CREATE TABLE items(supplier_id INT,
 ```
 
 ```sql
-cqlsh:example> INSERT INTO items(supplier_id, item_id, supplier_name, item_name)
+ycqlsh:example> INSERT INTO items(supplier_id, item_id, supplier_name, item_name)
                VALUES (1, 1, 'Unknown', 'Wrought Anvil');
 ```
 
 ```sql
-cqlsh:example> INSERT INTO items(supplier_id, item_id, supplier_name, item_name)
+ycqlsh:example> INSERT INTO items(supplier_id, item_id, supplier_name, item_name)
                VALUES (1, 2, 'Acme Corporation', 'Giant Rubber Band');
 ```
 
 ```sql
-cqlsh:example> SELECT * FROM devices;
+ycqlsh:example> SELECT * FROM devices;
 ```
 
 ```
@@ -159,10 +164,10 @@ cqlsh:example> SELECT * FROM devices;
 
 ### Use table property to define the order (ascending or descending) for clustering columns
 
-Timestmap column 'ts' will be stored in descending order (latest values first).
+Timestamp column 'ts' will be stored in descending order (latest values first).
 
 ```sql
-cqlsh:example> CREATE TABLE user_actions(user_id INT,
+ycqlsh:example> CREATE TABLE user_actions(user_id INT,
                                          ts TIMESTAMP,
                                          action TEXT,
                                          PRIMARY KEY((user_id), ts))
@@ -170,19 +175,19 @@ cqlsh:example> CREATE TABLE user_actions(user_id INT,
 ```
 
 ```sql
-cqlsh:example> INSERT INTO user_actions(user_id, ts, action) VALUES (1, '2000-12-2 12:30:15', 'log in');
+ycqlsh:example> INSERT INTO user_actions(user_id, ts, action) VALUES (1, '2000-12-2 12:30:15', 'log in');
 ```
 
 ```sql
-cqlsh:example> INSERT INTO user_actions(user_id, ts, action) VALUES (1, '2000-12-2 12:30:25', 'change password');
+ycqlsh:example> INSERT INTO user_actions(user_id, ts, action) VALUES (1, '2000-12-2 12:30:25', 'change password');
 ```
 
 ```sql
-cqlsh:example> INSERT INTO user_actions(user_id, ts, action) VALUES (1, '2000-12-2 12:30:35', 'log out');
+ycqlsh:example> INSERT INTO user_actions(user_id, ts, action) VALUES (1, '2000-12-2 12:30:35', 'log out');
 ```
 
 ```sql
-cqlsh:example> SELECT * FROM user_actions;
+ycqlsh:example> SELECT * FROM user_actions;
 ```
 
 ```
@@ -198,7 +203,7 @@ cqlsh:example> SELECT * FROM user_actions;
 You can do this as shown below.
 
 ```sql
-cqlsh:example> CREATE TABLE sensor_data(sensor_id INT,
+ycqlsh:example> CREATE TABLE sensor_data(sensor_id INT,
                                         ts TIMESTAMP,
                                         value DOUBLE,
                                         PRIMARY KEY((sensor_id), ts))
@@ -208,19 +213,19 @@ cqlsh:example> CREATE TABLE sensor_data(sensor_id INT,
 First insert at time T (row expires at T + 5).
 
 ```sql
-cqlsh:example> INSERT INTO sensor_data(sensor_id, ts, value) VALUES (1, '2017-10-1 11:22:31', 3.1);
+ycqlsh:example> INSERT INTO sensor_data(sensor_id, ts, value) VALUES (1, '2017-10-1 11:22:31', 3.1);
 ```
 
 Second insert 3 seconds later (row expires at T + 8).
 
 ```sql
-cqlsh:example> INSERT INTO sensor_data(sensor_id, ts, value) VALUES (2, '2017-10-1 11:22:34', 3.4);
+ycqlsh:example> INSERT INTO sensor_data(sensor_id, ts, value) VALUES (2, '2017-10-1 11:22:34', 3.4);
 ```
 
 First select 3 seconds later (at time T + 6).
 
 ```sql
-cqlsh:example> SELECT * FROM sensor_data;
+ycqlsh:example> SELECT * FROM sensor_data;
 ```
 
 ```
@@ -228,10 +233,11 @@ cqlsh:example> SELECT * FROM sensor_data;
 -----------+---------------------------------+-------
          2 | 2017-10-01 18:22:34.000000+0000 |   3.4
 ```
+
 Second select 3 seconds later (at time T + 9).
 
 ```sql
-cqlsh:example> SELECT * FROM sensor_data;
+ycqlsh:example> SELECT * FROM sensor_data;
 ```
 
 ```
@@ -240,12 +246,29 @@ cqlsh:example> SELECT * FROM sensor_data;
 
 ```
 
+### Create a table specifying the number of tablets
+
+You can use the `CREATE TABLE` statement with the `WITH tablets = <num>` clause to specify the number of tablets for a table. This is useful to scale the table up or down based on requirements. For example, for smaller static tables, it may be wasteful to have a large number of shards (tablets). In that case, you can use this to reduce the number of tablets created for the table. Similarly, for a very large table, you can use this statement to presplit the table into a large number of shards to get improved performance.
+
+Note that YugabyteDB, by default, presplits a table in `yb_num_shards_per_tserver * num_of_tserver` shards. This clause can be used to override that setting on per-table basis.
+
+```sql
+ycqlsh:example> CREATE TABLE tracking (id int PRIMARY KEY) WITH tablets = 10;
+```
+
+If you create an index for these tables, you can also specify the number of tablets for the index.
+
+You can also use `AND` to add other table properties, like in this example.
+
+```sql
+ycqlsh:example> CREATE TABLE tracking (id int PRIMARY KEY) WITH tablets = 10 AND transactions = { 'enabled' : true };
+```
+
 ## See also
 
-[`ALTER TABLE`](../ddl_alter_table)
-[`DELETE`](../dml_delete)
-[`DROP TABLE`](../ddl_drop_table)
-[`INSERT`](../dml_insert)
-[`SELECT`](../dml_select)
-[`UPDATE`](../dml_update)
-[Other CQL Statements](..)
+- [`ALTER TABLE`](../ddl_alter_table)
+- [`DELETE`](../dml_delete)
+- [`DROP TABLE`](../ddl_drop_table)
+- [`INSERT`](../dml_insert)
+- [`SELECT`](../dml_select)
+- [`UPDATE`](../dml_update)

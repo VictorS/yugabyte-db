@@ -36,6 +36,7 @@ set(CLIENT_SRCS
   batcher.cc
   client.cc
   client_builder-internal.cc
+  client_error.cc
   client-internal.cc
   client_utils.cc
   error.cc
@@ -43,6 +44,7 @@ set(CLIENT_SRCS
   in_flight_op.cc
   meta_cache.cc
   meta_data_cache.cc
+  namespace_alterer.cc
   permissions.cc
   session.cc
   schema.cc
@@ -52,6 +54,7 @@ set(CLIENT_SRCS
   table_handle.cc
   tablet_rpc.cc
   transaction.cc
+  transaction_cleanup.cc
   transaction_manager.cc
   transaction_pool.cc
   transaction_rpc.cc
@@ -62,6 +65,7 @@ set(CLIENT_SRCS
 
 set(CLIENT_LIBS
   yb_common
+  yb_partition
   master_proto
   master_rpc
   master_util
@@ -107,7 +111,8 @@ target_link_libraries(ql-dml-test-base integration-tests)
 
 # Tests
 
-set(YB_TEST_LINK_LIBS yb_client ql_util integration-tests ql-dml-test-base ${YB_MIN_TEST_LIBS})
+set(YB_TEST_LINK_LIBS integration-tests rpc_test_util ql-dml-test-base ${YB_MIN_TEST_LIBS})
+ADD_YB_TEST(backup-txn-test)
 ADD_YB_TEST(client-test)
 ADD_YB_TEST(client-unittest)
 ADD_YB_TEST(ql-dml-test)
@@ -116,6 +121,7 @@ ADD_YB_TEST(ql-list-test)
 ADD_YB_TEST(ql-tablet-test)
 ADD_YB_TEST(ql-transaction-test)
 ADD_YB_TEST(ql-stress-test)
+ADD_YB_TEST(seal-txn-test)
 ADD_YB_TEST(snapshot-txn-test)
 ADD_YB_TEST(serializable-txn-test)
 ADD_YB_TEST(tablet_rpc-test)

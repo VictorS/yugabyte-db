@@ -265,7 +265,7 @@ TEST_F(DeleteTableTest, TestPendingDeleteStateClearedOnFailure) {
   vector<string> tserver_flags, master_flags;
   master_flags.push_back("--unresponsive_ts_rpc_timeout_ms=5000");
   // Disable tablet delete operations.
-  tserver_flags.push_back("--rpc_delete_tablet_fail=true");
+  tserver_flags.push_back("--TEST_rpc_delete_tablet_fail=true");
   ASSERT_NO_FATALS(StartCluster(tserver_flags, master_flags, 3));
   // Create a table on the cluster. We're just using TestWorkload
   // as a convenient way to create it.
@@ -315,9 +315,8 @@ TEST_F(DeleteTableTest, TestDeleteEmptyTable) {
   // Check that the master no longer exposes the table in any way:
 
   // 1) Should not list it in ListTables.
-  vector<YBTableName> table_names;
-  ASSERT_OK(client_->ListTables(&table_names, /* filter */ "", /* exclude_ysql */ true));
-  ASSERT_EQ(master::kNumSystemTables, table_names.size());
+  const auto tables = ASSERT_RESULT(client_->ListTables(/* filter */ "", /* exclude_ysql */ true));
+  ASSERT_EQ(master::kNumSystemTables, tables.size());
 
   // 2) Should respond to GetTableSchema with a NotFound error.
   YBSchema schema;
@@ -443,7 +442,8 @@ TEST_F(DeleteTableTest, TestDeleteTableWithConcurrentWrites) {
   int n_iters = AllowSlowTests() ? 20 : 1;
   for (int i = 0; i < n_iters; i++) {
     TestWorkload workload(cluster_.get());
-    workload.set_table_name(YBTableName("my_keyspace", Substitute("table-$0", i)));
+    workload.set_table_name(YBTableName(YQL_DATABASE_CQL, "my_keyspace",
+        Substitute("table-$0", i)));
 
     // We'll delete the table underneath the writers, so we expcted
     // a NotFound error during the writes.
@@ -485,7 +485,7 @@ TEST_F(DeleteTableTest, DeleteTableWithConcurrentWritesNoRestarts) {
   constexpr auto kNumIters = 10;
   for (int iter = 0; iter < kNumIters; iter++) {
     TestWorkload workload(cluster_.get());
-    workload.set_table_name(YBTableName("my_keyspace", Format("table-$0", iter)));
+    workload.set_table_name(YBTableName(YQL_DATABASE_CQL, "my_keyspace", Format("table-$0", iter)));
 
     // We'll delete the table underneath the writers, so we expect a NotFound error during the
     // writes.
@@ -544,7 +544,7 @@ TEST_F(DeleteTableTest, TestAutoTombstoneAfterCrashDuringRemoteBootstrap) {
 
   // Enable a fault crash when remote bootstrap occurs on TS 0.
   ASSERT_OK(cluster_->tablet_server(kTsIndex)->Restart());
-  const string& kFaultFlag = "fault_crash_after_rb_files_fetched";
+  const string& kFaultFlag = "TEST_fault_crash_after_rb_files_fetched";
   ASSERT_OK(cluster_->SetFlag(cluster_->tablet_server(kTsIndex), kFaultFlag, "1.0"));
 
   // Figure out the tablet id to remote bootstrap.
@@ -628,7 +628,7 @@ TEST_F(DeleteTableTest, TestAutoTombstoneAfterRemoteBootstrapRemoteFails) {
   workload.StopAndJoin();
 
   // Cause the leader to crash when a follower tries to remotely bootstrap from it.
-  const string& fault_flag = "fault_crash_on_handle_rb_fetch_data";
+  const string& fault_flag = "TEST_fault_crash_on_handle_rb_fetch_data";
   ASSERT_OK(cluster_->SetFlag(cluster_->tablet_server(leader_index), fault_flag, "1.0"));
 
   // Add our TS 0 to the config and wait for the leader to crash.
@@ -881,6 +881,60 @@ TEST_F(DeleteTableTest, TestDeleteFollowerWithReplicatingOperation) {
   ASSERT_OK(itest::DeleteTablet(ts, tablet_id, TABLET_DATA_TOMBSTONED, boost::none, timeout));
 }
 
+// Verify that memtable is not flushed when tablet is deleted.
+TEST_F(DeleteTableTest, TestMemtableNoFlushOnTabletDelete) {
+  const MonoDelta timeout = MonoDelta::FromSeconds(10);
+
+  const int kNumTabletServers = 1;
+  vector<string> ts_flags, master_flags;
+  master_flags.push_back("--replication_factor=1");
+  master_flags.push_back("--yb_num_shards_per_tserver=1");
+  ASSERT_NO_FATALS(StartCluster(ts_flags, master_flags, kNumTabletServers));
+
+  const int kTsIndex = 0;  // We'll test with the first TS.
+  TServerDetails* ts = ts_map_[cluster_->tablet_server(kTsIndex)->uuid()].get();
+
+  // Create the table.
+  TestWorkload workload(cluster_.get());
+  workload.Setup();
+
+  // Figure out the tablet ids of the created tablets.
+  vector<ListTabletsResponsePB::StatusAndSchemaPB> tablets;
+  ASSERT_OK(WaitForNumTabletsOnTS(ts, 1, timeout, &tablets));
+  const string& tablet_id = tablets[0].tablet_status().tablet_id();
+
+  // Wait until all replicas are up and running.
+  for (int i = 0; i < cluster_->num_tablet_servers(); i++) {
+    ASSERT_OK(itest::WaitUntilTabletRunning(ts_map_[cluster_->tablet_server(i)->uuid()].get(),
+                                            tablet_id, timeout));
+  }
+
+  // Elect TS 0 as leader.
+  const int kLeaderIndex = 0;
+  const string kLeaderUuid = cluster_->tablet_server(kLeaderIndex)->uuid();
+  TServerDetails* leader = ts_map_[kLeaderUuid].get();
+  ASSERT_OK(itest::StartElection(leader, tablet_id, timeout));
+  ASSERT_OK(WaitForServersToAgree(timeout, ts_map_, tablet_id, 1));
+
+  // Now write a single row to the leader.
+  LOG(INFO) << "Writing a row";
+  ASSERT_OK(WriteSimpleTestRow(leader, tablet_id, 1, 1, "hola, world", MonoDelta::FromSeconds(5)));
+
+  // Set test flag to detect that memtable should not be flushed on table delete.
+  ASSERT_OK(cluster_->SetFlag(cluster_->tablet_server(kLeaderIndex),
+        "TEST_rocksdb_crash_on_flush", "true"));
+
+  // Now delete the tablet.
+  ASSERT_OK(itest::DeleteTablet(ts, tablet_id, TABLET_DATA_DELETED, boost::none, timeout));
+
+  // Sleep to allow background memtable flush to be scheduled (in case).
+  SleepFor(MonoDelta::FromMilliseconds(5 * 1000));
+
+  // Unset test flag to allow other memtable flushes (if any) in teardown
+  ASSERT_OK(cluster_->SetFlag(cluster_->tablet_server(kLeaderIndex),
+        "TEST_rocksdb_crash_on_flush", "false"));
+}
+
 // Test that orphaned blocks are cleared from the superblock when a tablet is tombstoned.
 TEST_F(DeleteTableTest, TestOrphanedBlocksClearedOnDelete) {
   const MonoDelta timeout = MonoDelta::FromSeconds(30);
@@ -1047,9 +1101,9 @@ TEST_P(DeleteTableDeletedParamTest, TestRollForwardDelete) {
 }
 
 // Faults appropriate for the TABLET_DATA_DELETED case.
-const char* deleted_faults[] = {"fault_crash_after_blocks_deleted",
-                                "fault_crash_after_wal_deleted",
-                                "fault_crash_after_cmeta_deleted"};
+const char* deleted_faults[] = {"TEST_fault_crash_after_blocks_deleted",
+                                "TEST_fault_crash_after_wal_deleted",
+                                "TEST_fault_crash_after_cmeta_deleted"};
 
 INSTANTIATE_TEST_CASE_P(FaultFlags, DeleteTableDeletedParamTest,
                         ::testing::ValuesIn(deleted_faults));
@@ -1077,11 +1131,12 @@ TEST_P(DeleteTableTombstonedParamTest, TestTabletTombstone) {
   // injecting any faults, then we delete the second tablet while exercising
   // several fault injection points.
   ASSERT_OK(client_->CreateNamespaceIfNotExists(
-      TestWorkloadOptions::kDefaultTableName.namespace_name()));
+      TestWorkloadOptions::kDefaultTableName.namespace_name(),
+      TestWorkloadOptions::kDefaultTableName.namespace_type()));
   const int kNumTablets = 2;
   Schema schema(GetSimpleTestSchema());
   client::YBSchema client_schema(client::YBSchemaFromSchema(schema));
-  gscoped_ptr<YBTableCreator> table_creator(client_->NewTableCreator());
+  std::unique_ptr<YBTableCreator> table_creator(client_->NewTableCreator());
   ASSERT_OK(table_creator->table_name(TestWorkloadOptions::kDefaultTableName)
                           .num_tablets(kNumTablets)
                           .schema(&client_schema)
@@ -1162,6 +1217,16 @@ TEST_P(DeleteTableTombstonedParamTest, TestTabletTombstone) {
         << t.tablet_status().tablet_id() << " not tombstoned";
   }
 
+  // Check that, upon restart of the tablet server with a tombstoned tablet,
+  // we don't unnecessary "roll forward" and rewrite the tablet metadata file
+  // when it is already fully deleted.
+  int64_t orig_mtime = inspect_->GetTabletSuperBlockMTimeOrDie(kTsIndex, tablet_id);
+  cluster_->tablet_server(kTsIndex)->Shutdown();
+  ASSERT_OK(cluster_->tablet_server(kTsIndex)->Restart());
+  int64_t new_mtime = inspect_->GetTabletSuperBlockMTimeOrDie(kTsIndex, tablet_id);
+  ASSERT_EQ(orig_mtime, new_mtime)
+                << "Tablet superblock should not have been re-flushed unnecessarily";
+
   // Finally, delete all tablets on the TS, and wait for all data to be gone.
   LOG(INFO) << "Deleting all tablets...";
   for (const ListTabletsResponsePB::StatusAndSchemaPB& tablet : tablets) {
@@ -1181,8 +1246,8 @@ TEST_P(DeleteTableTombstonedParamTest, TestTabletTombstone) {
 
 // Faults appropriate for the TABLET_DATA_TOMBSTONED case.
 // Tombstoning a tablet does not delete the consensus metadata.
-const char* tombstoned_faults[] = {"fault_crash_after_blocks_deleted",
-                                   "fault_crash_after_wal_deleted"};
+const char* tombstoned_faults[] = {"TEST_fault_crash_after_blocks_deleted",
+                                   "TEST_fault_crash_after_wal_deleted"};
 
 INSTANTIATE_TEST_CASE_P(FaultFlags, DeleteTableTombstonedParamTest,
                         ::testing::ValuesIn(tombstoned_faults));

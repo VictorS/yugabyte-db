@@ -1,8 +1,8 @@
 ---
-title: DO
+title: DO statement [YSQL]
+headerTitle: DO
 linkTitle: DO
-summary: DO
-description: DO
+description: Use the DO statement to execute an anonymous code block or, in other words, a transient anonymous function in a procedural language.
 menu:
   latest:
     identifier: api-ysql-commands-do
@@ -13,10 +13,9 @@ showAsideToc: true
 
 ## Synopsis
 
-`DO` executes an anonymous code block, or in other words a transient anonymous function in a procedural language.
+Use the `DO` statement to execute an anonymous code block, or in other words, a transient anonymous function in a procedural language.
 The code block is treated as though it were the body of a function with no parameters, returning void. It is parsed and executed a single time.
-The optional LANGUAGE clause can be written either before or after the code block.
-
+The optional `LANGUAGE` clause can be written either before or after the code block.
 
 ## Syntax
 
@@ -69,7 +68,3 @@ BEGIN
     END LOOP;
 END$$;
 ```
-
-## See also
-
-[Other YSQL Statements](..)

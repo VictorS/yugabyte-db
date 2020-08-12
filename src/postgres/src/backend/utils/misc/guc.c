@@ -128,6 +128,9 @@ extern bool trace_syncscan;
 extern bool optimize_bounded_sort;
 #endif
 
+static double yb_transaction_priority_lower_bound = 0.0;
+static double yb_transaction_priority_upper_bound = 1.0;
+
 static int	GUC_check_errcode_value;
 
 /* global variables for check hook support */
@@ -196,6 +199,11 @@ static bool check_cluster_name(char **newval, void **extra, GucSource source);
 static const char *show_unix_socket_permissions(void);
 static const char *show_log_file_mode(void);
 static const char *show_data_directory_mode(void);
+
+static bool check_transaction_priority_lower_bound(double *newval, void **extra, GucSource source);
+extern void YBCAssignTransactionPriorityLowerBound(double newval, void* extra);
+static bool check_transaction_priority_upper_bound(double *newval, void **extra, GucSource source);
+extern void YBCAssignTransactionPriorityUpperBound(double newval, void* extra);
 
 /* Private functions in guc-file.l that need to be called from guc.c */
 static ConfigVariable *ProcessConfigFileInternal(GucContext context,
@@ -1449,7 +1457,7 @@ static struct config_bool ConfigureNamesBool[] =
 		},
 		&XactReadOnly,
 		false,
-		check_transaction_read_only, NULL, NULL
+		check_transaction_read_only, assign_transaction_read_only, NULL
 	},
 	{
 		{"default_transaction_deferrable", PGC_USERSET, CLIENT_CONN_STATEMENT,
@@ -1468,7 +1476,7 @@ static struct config_bool ConfigureNamesBool[] =
 		},
 		&XactDeferrable,
 		false,
-		check_transaction_deferrable, NULL, NULL
+		check_transaction_deferrable, assign_transaction_deferrable, NULL
 	},
 	{
 		{"row_security", PGC_USERSET, CLIENT_CONN_STATEMENT,
@@ -1827,12 +1835,45 @@ static struct config_bool ConfigureNamesBool[] =
 	},
 
 	{
-		{"yb_debug_mode", PGC_USERSET, DEVELOPER_OPTIONS,
-			gettext_noop("Enable yb debugging."),
+		{"yb_debug_report_error_stacktrace", PGC_USERSET, DEVELOPER_OPTIONS,
+			gettext_noop("Append stacktrace information for error messages."),
 			NULL,
 			GUC_NOT_IN_SAMPLE
 		},
-		&yb_debug_mode,
+		&yb_debug_report_error_stacktrace,
+		false,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"yb_debug_log_catcache_events", PGC_USERSET, DEVELOPER_OPTIONS,
+			gettext_noop("Log details for every catalog cache event such as a cache miss or cache invalidation/refresh."),
+			NULL,
+			GUC_NOT_IN_SAMPLE
+		},
+		&yb_debug_log_catcache_events,
+		false,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"yb_debug_log_internal_restarts", PGC_USERSET, DEVELOPER_OPTIONS,
+			gettext_noop("Log details for internal restarts such as read-restarts, cache-invalidation restarts, or txn restarts."),
+			NULL,
+			GUC_NOT_IN_SAMPLE
+		},
+		&yb_debug_log_internal_restarts,
+		false,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"yb_debug_log_docdb_requests", PGC_USERSET, DEVELOPER_OPTIONS,
+			gettext_noop("Log the contents of all internal (protobuf) requests to DocDB."),
+			NULL,
+			GUC_NOT_IN_SAMPLE
+		},
+		&yb_debug_log_docdb_requests,
 		false,
 		NULL, NULL, NULL
 	},
@@ -2281,7 +2322,7 @@ static struct config_int ConfigureNamesInt[] =
 		},
 		&StatementTimeout,
 		0, 0, INT_MAX,
-		NULL, NULL, NULL
+		NULL, YBCSetTimeout, NULL
 	},
 
 	{
@@ -3278,6 +3319,24 @@ static struct config_real ConfigureNamesReal[] =
 		&vacuum_cleanup_index_scale_factor,
 		0.1, 0.0, 1e10,
 		NULL, NULL, NULL
+	},
+	{
+		{"yb_transaction_priority_lower_bound", PGC_USERSET, CLIENT_CONN_STATEMENT,
+			gettext_noop("Sets lower bound for priority used by transactions of this session"),
+			NULL
+		},
+		&yb_transaction_priority_lower_bound,
+		0.0, 0.0, 1.0,
+		check_transaction_priority_lower_bound, YBCAssignTransactionPriorityLowerBound, NULL
+	},
+	{
+		{"yb_transaction_priority_upper_bound", PGC_USERSET, CLIENT_CONN_STATEMENT,
+			gettext_noop("Sets upper bound for priority used by transactions of this session"),
+			NULL
+		},
+		&yb_transaction_priority_upper_bound,
+		1.0, 0.0, 1.0,
+		check_transaction_priority_upper_bound, YBCAssignTransactionPriorityUpperBound, NULL
 	},
 
 	/* End-of-list marker */
@@ -10827,5 +10886,30 @@ show_data_directory_mode(void)
 	snprintf(buf, sizeof(buf), "%04o", data_directory_mode);
 	return buf;
 }
+
+static bool
+check_transaction_priority_lower_bound(double *newval, void **extra, GucSource source)
+{
+	if (*newval > yb_transaction_priority_upper_bound) {
+		GUC_check_errdetail("must be less than or equal to yb_transaction_priority_upper_bound (%f)",
+		                    yb_transaction_priority_upper_bound);
+		return false;
+	}
+
+	return true;
+}
+
+static bool
+check_transaction_priority_upper_bound(double *newval, void **extra, GucSource source)
+{
+	if (*newval < yb_transaction_priority_lower_bound) {
+		GUC_check_errdetail("must be greater than or equal to yb_transaction_priority_lower_bound (%f)",
+		                    yb_transaction_priority_lower_bound);
+		return false;
+	}
+
+	return true;
+}
+
 
 #include "guc-file.c"

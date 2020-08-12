@@ -32,6 +32,7 @@
 #include "yb/util/logging.h"
 #include "yb/util/result.h"
 #include "yb/util/strongly_typed_bool.h"
+#include "yb/util/strongly_typed_uuid.h"
 #include "yb/util/uuid.h"
 
 namespace rocksdb {
@@ -42,11 +43,8 @@ class DB;
 
 namespace yb {
 
-using TransactionId = boost::uuids::uuid;
-typedef boost::hash<TransactionId> TransactionIdHash;
+YB_STRONGLY_TYPED_UUID(TransactionId);
 using TransactionIdSet = std::unordered_set<TransactionId, TransactionIdHash>;
-
-inline TransactionId GenerateTransactionId() { return Uuid::Generate(); }
 
 // Decodes transaction id from its binary representation.
 // Checks that slice contains only TransactionId.
@@ -138,6 +136,9 @@ class TransactionStatusManager {
   virtual void FillPriorities(
       boost::container::small_vector_base<std::pair<TransactionId, uint64_t>>* inout) = 0;
 
+  // Returns minimal running hybrid time of all running transactions.
+  virtual HybridTime MinRunningHybridTime() const = 0;
+
  private:
   friend class RequestScope;
 
@@ -215,22 +216,28 @@ inline std::ostream& operator<<(std::ostream& out, const TransactionOperationCon
 }
 
 struct TransactionMetadata {
-  TransactionId transaction_id = boost::uuids::nil_uuid();
+  TransactionId transaction_id = TransactionId::Nil();
   IsolationLevel isolation = IsolationLevel::NON_TRANSACTIONAL;
   TabletId status_tablet;
+
+  // By default random value is picked for newly created transaction.
   uint64_t priority;
 
   // Used for snapshot isolation (as read time and for conflict resolution).
   // start_time is used only for backward compability during rolling update.
-  HybridTime DEPRECATED_start_time;
+  HybridTime start_time;
 
   static Result<TransactionMetadata> FromPB(const TransactionMetadataPB& source);
 
   void ToPB(TransactionMetadataPB* dest) const;
 
+  // Fill dest with full metadata even when isolation is non transactional.
+  void ForceToPB(TransactionMetadataPB* dest) const;
+
   std::string ToString() const {
-    return Format("{ transaction_id: $0 isolation: $1 status_tablet: $2 priority: $3 }",
-                  transaction_id, isolation, status_tablet, priority);
+    return Format(
+        "{ transaction_id: $0 isolation: $1 status_tablet: $2 priority: $3 start_time: $4 }",
+        transaction_id, IsolationLevel_Name(isolation), status_tablet, priority, start_time);
   }
 };
 

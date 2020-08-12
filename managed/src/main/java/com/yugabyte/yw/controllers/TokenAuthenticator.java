@@ -2,6 +2,8 @@
 
 package com.yugabyte.yw.controllers;
 
+import play.Configuration;
+
 import play.mvc.Action;
 import play.mvc.Http;
 import play.mvc.Result;
@@ -16,8 +18,15 @@ import com.google.inject.Inject;
 
 import com.yugabyte.yw.common.ConfigHelper;
 import com.yugabyte.yw.models.Customer;
+import com.yugabyte.yw.models.Users;
+
+import org.pac4j.core.profile.CommonProfile;
+import org.pac4j.core.profile.ProfileManager;
+import org.pac4j.play.PlayWebContext;
+import org.pac4j.play.store.PlaySessionStore;
 
 import static com.yugabyte.yw.common.ConfigHelper.ConfigType.Security;
+import static com.yugabyte.yw.models.Users.Role;
 
 public class TokenAuthenticator extends Action.Simple {
   public static final String COOKIE_AUTH_TOKEN = "authToken";
@@ -28,37 +37,83 @@ public class TokenAuthenticator extends Action.Simple {
   @Inject
   ConfigHelper configHelper;
 
-  @Override
-  public CompletionStage<Result> call(Http.Context ctx) {
-    String securityLevel = (String) configHelper.getConfig(Security).get("level");
-    if (securityLevel == null || !securityLevel.equals("insecure")) {
-      String path = ctx.request().path();
-      Pattern pattern = Pattern.compile(".*/customers/([a-zA-Z0-9-]+)(/.*)?");
-      Matcher matcher = pattern.matcher(path);
-      UUID custUUID = null;
-      if (matcher.find()) {
-        custUUID = UUID.fromString(matcher.group(1));
+  @Inject
+  Configuration appConfig;
+
+  @Inject
+  private PlaySessionStore playSessionStore;
+
+  private Users getCurrentAuthenticatedUser(Http.Context ctx) {
+    boolean useOAuth = appConfig.getBoolean("yb.security.use_oauth", false);
+    if (useOAuth) {
+      final PlayWebContext context = new PlayWebContext(ctx, playSessionStore);
+      final ProfileManager<CommonProfile> profileManager = new ProfileManager(context);
+      if (profileManager.isAuthenticated()) {
+        String email = profileManager.get(true).get().getEmail();
+        return Users.getByEmail(email);
       }
+    } else {
       String token = fetchToken(ctx, true);
-      Customer cust = null;
       if (token != null) {
-        cust = Customer.authWithApiToken(token);
+        return Users.authWithApiToken(token);
       } else {
         token = fetchToken(ctx, false);
-        cust = Customer.authWithToken(token);
-      }
-
-      // Some authenticated calls don't actually need to be authenticated
-      // (e.g. /metadata/column_types). Only check auth_token is valid in that case.
-      if (cust != null && (custUUID == null || custUUID.equals(cust.uuid))) {
-        ctx.request().withUsername(cust.getEmail());
-        ctx.args.put("customer", cust);
-      } else {
-        // Send Forbidden Response if Authentication Fails
-        return CompletableFuture.completedFuture(Results.forbidden("Unable To Authenticate Customer"));
+        return Users.authWithToken(token);
       }
     }
+    return null;
+  }
+
+  @Override
+  public CompletionStage<Result> call(Http.Context ctx) {
+    String path = ctx.request().path();
+    String endPoint = "";
+    String requestType = ctx.request().method();
+    Pattern pattern = Pattern.compile(".*/customers/([a-zA-Z0-9-]+)(/.*)?");
+    Matcher matcher = pattern.matcher(path);
+    UUID custUUID = null;
+    if (matcher.find()) {
+      custUUID = UUID.fromString(matcher.group(1));
+      endPoint = ((endPoint = matcher.group(2)) != null) ? endPoint : "";
+    }
+    Customer cust = null;
+    Users user = getCurrentAuthenticatedUser(ctx);
+
+    if (user != null) {
+      cust = Customer.get(user.customerUUID);
+    }
+
+    // Some authenticated calls don't actually need to be authenticated
+    // (e.g. /metadata/column_types). Only check auth_token is valid in that case.
+    if (cust != null && (custUUID == null || custUUID.equals(cust.uuid))) {
+      if (!checkAccessLevel(endPoint, user, requestType)) {
+        return CompletableFuture.completedFuture(Results.forbidden("User doesn't have access"));
+      }
+      ctx.request().withUsername(user.getEmail());
+      ctx.args.put("customer", cust);
+      ctx.args.put("user", user);
+    } else {
+      // Send Forbidden Response if Authentication Fails.
+      return CompletableFuture.completedFuture(Results.forbidden("Unable To Authenticate User"));
+    }
     return delegate.call(ctx);
+  }
+
+  public boolean superAdminAuthentication(Http.Context ctx) {
+    String token = fetchToken(ctx, true);
+    Users user = null;
+    if (token != null) {
+      user = Users.authWithApiToken(token);
+    } else {
+      token = fetchToken(ctx, false);
+      user = Users.authWithToken(token);
+    }
+    if (user != null) {
+      if (user.getRole() == Role.SuperAdmin) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private String fetchToken(Http.Context ctx, boolean isApiToken) {
@@ -80,5 +135,42 @@ public class TokenAuthenticator extends Action.Simple {
       return cookieValue.value();
     }
     return null;
+  }
+
+  // Check role, and if the API call is accessible.
+  private boolean checkAccessLevel(String endPoint, Users user, String requestType) {
+    // Users should be allowed to change their password.
+    // Even admin users should not be allowed to change another
+    // user's password.
+    if (endPoint != null) {
+      if (endPoint.endsWith("/change_password")) {
+        UUID userUUID = UUID.fromString(endPoint.split("/")[2]);
+        if (userUUID.equals(user.uuid)) {
+          return true;
+        }
+        return false;
+      }
+    }
+
+    // All users have access to get, metrics and setting an API token.
+    if (requestType.equals("GET") || endPoint.equals("/metrics") ||
+        endPoint.equals("/api_token")) {
+      return true;
+    }
+    // If the user is readonly, then don't get any further access.
+    if (user.getRole() == Role.ReadOnly) {
+      return false;
+    }
+    // All users other than read only get access to backup endpoints.
+    if (endPoint.endsWith("/create_backup") || endPoint.endsWith("/multi_table_backup") ||
+        endPoint.endsWith("/restore")) {
+      return true;
+    }
+    // If the user is backupAdmin, they don't get further access.
+    if (user.getRole() == Role.BackupAdmin) {
+      return false;
+    }
+    // If the user has reached here, they have complete access.
+    return true;
   }
 }

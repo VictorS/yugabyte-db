@@ -11,20 +11,35 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
-import java.util.Random;
 
-import java.nio.charset.Charset;
-
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
+import com.yugabyte.yw.cloud.PublicCloudConstants;
 import com.yugabyte.yw.common.CertificateHelper;
+import com.yugabyte.yw.common.ConfigHelper;
+import com.yugabyte.yw.common.YcqlQueryExecutor;
+import com.yugabyte.yw.common.YsqlQueryExecutor;
+import com.yugabyte.yw.common.ShellProcessHandler;
+import com.yugabyte.yw.common.kms.util.AwsEARServiceUtil.KeyType;
 import com.yugabyte.yw.common.services.YBClientService;
+import com.yugabyte.yw.forms.RunInShellFormData;
+import com.yugabyte.yw.forms.RunQueryFormData;
+import com.yugabyte.yw.forms.AlertConfigFormData;
 import com.yugabyte.yw.forms.UniverseDefinitionTaskParams;
+import com.yugabyte.yw.forms.EncryptionAtRestKeyParams;
+import com.yugabyte.yw.forms.DatabaseSecurityFormData;
+import com.yugabyte.yw.forms.DatabaseUserFormData;
+import com.yugabyte.yw.forms.DiskIncreaseFormData;
+import com.yugabyte.yw.forms.UniverseTaskParams.EncryptionAtRestConfig.OpType;
 import com.yugabyte.yw.forms.UniverseDefinitionTaskParams.Cluster;
 import com.yugabyte.yw.forms.UniverseDefinitionTaskParams.ClusterType;
 import com.yugabyte.yw.forms.UniverseDefinitionTaskParams.UserIntent;
-import com.yugabyte.yw.forms.RollingRestartParams;
+import com.yugabyte.yw.forms.UpgradeParams;
+import com.yugabyte.yw.forms.UniverseTaskParams.EncryptionAtRestConfig;
 import com.yugabyte.yw.metrics.MetricQueryHelper;
 import com.yugabyte.yw.models.helpers.PlacementInfo;
 import com.yugabyte.yw.models.helpers.TaskType;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -38,11 +53,11 @@ import com.yugabyte.yw.commissioner.Commissioner;
 import com.yugabyte.yw.commissioner.Common.CloudType;
 import com.yugabyte.yw.commissioner.tasks.DestroyUniverse;
 import com.yugabyte.yw.commissioner.tasks.ReadOnlyClusterDelete;
-import com.yugabyte.yw.common.ApiHelper;
 import com.yugabyte.yw.common.ApiResponse;
-import com.yugabyte.yw.common.EncryptionAtRestService;
+import com.yugabyte.yw.common.kms.EncryptionAtRestManager;
 import com.yugabyte.yw.common.PlacementInfoUtil;
 import com.yugabyte.yw.common.Util;
+import com.yugabyte.yw.models.Audit;
 import com.yugabyte.yw.models.Customer;
 import com.yugabyte.yw.models.CustomerTask;
 import com.yugabyte.yw.models.HealthCheck;
@@ -51,6 +66,9 @@ import com.yugabyte.yw.models.TaskInfo;
 import com.yugabyte.yw.models.Universe;
 import com.yugabyte.yw.models.helpers.NodeDetails;
 import org.yb.client.YBClient;
+import play.Application;
+import play.api.Play;
+import play.data.Form;
 import play.data.FormFactory;
 import play.libs.Json;
 import play.mvc.Result;
@@ -76,7 +94,20 @@ public class UniverseController extends AuthenticatedController {
   play.Configuration appConfig;
 
   @Inject
-  ApiHelper apiHelper;
+  ConfigHelper configHelper;
+
+  @Inject
+  EncryptionAtRestManager keyManager;
+
+  @Inject
+  YsqlQueryExecutor ysqlQueryExecutor;
+
+  @Inject
+  YcqlQueryExecutor ycqlQueryExecutor;
+
+  @Inject
+  ShellProcessHandler shellProcessHandler;
+
 
   // The YB client to use.
   public YBClientService ybService;
@@ -84,6 +115,31 @@ public class UniverseController extends AuthenticatedController {
   @Inject
   public UniverseController(YBClientService service) {
     this.ybService = service;
+  }
+
+  private Universe checkCallValid(UUID customerUUID, UUID universeUUID) {
+    // Verify the customer with this universe is present.
+    Customer customer = Customer.get(customerUUID);
+    if (customer == null) {
+      throw new RuntimeException("No customer found with UUID: " + customerUUID);
+    }
+
+    // Get the universe. This makes sure that a universe of this name does exist
+    // for this customer id.
+    Universe universe = null;
+    try {
+      universe = Universe.get(universeUUID);
+    } catch (RuntimeException e) {
+      throw new RuntimeException("No universe found with UUID: " + universeUUID);
+    }
+
+    // Check the universe belongs to the Customer.
+    if (!customer.getUniverseUUIDs().contains(universeUUID)) {
+      throw new RuntimeException(
+          String.format("Universe UUID: %s doesn't belong " +
+                        "to Customer UUID: %s", universeUUID, customerUUID));
+    }
+    return universe;
   }
 
   /**
@@ -102,6 +158,196 @@ public class UniverseController extends AuthenticatedController {
     } else {
       return ApiResponse.success("Universe does not Exist");
     }
+  }
+
+  public Result setDatabaseCredentials(UUID customerUUID, UUID universeUUID) {
+    Universe universe;
+    try {
+      universe = checkCallValid(customerUUID, universeUUID);
+    } catch (RuntimeException e) {
+      return ApiResponse.error(BAD_REQUEST, e.getMessage());
+    }
+    Customer customer = Customer.get(customerUUID);
+    Form<DatabaseSecurityFormData> formData =
+        formFactory.form(DatabaseSecurityFormData.class).bindFromRequest();
+    if (formData.hasErrors()) {
+      return ApiResponse.error(BAD_REQUEST, formData.errorsAsJson());
+    }
+
+    DatabaseSecurityFormData data = formData.get();
+    if (data.ysqlAdminUsername != null) {
+      if (data.dbName == null) {
+        return ApiResponse.error(BAD_REQUEST, "DB needs to be specified for YSQL user change.");
+      }
+      // Update admin user password YSQL.
+      RunQueryFormData ysqlQuery = new RunQueryFormData();
+      ysqlQuery.query = String.format("ALTER USER %s WITH PASSWORD '%s'", data.ysqlAdminUsername,
+          data.ysqlAdminPassword);
+      ysqlQuery.db_name = data.dbName;
+      ysqlQueryExecutor.executeQuery(universe, ysqlQuery, data.ysqlAdminUsername,
+          data.ysqlCurrAdminPassword);
+    }
+
+    if (data.ycqlAdminUsername != null) {
+      // Update admin user password CQL.
+      RunQueryFormData ycqlQuery = new RunQueryFormData();
+      ycqlQuery.query = String.format("ALTER ROLE %s WITH PASSWORD='%s'",
+          data.ycqlAdminUsername, data.ycqlAdminPassword);
+      ycqlQueryExecutor.executeQuery(universe, ycqlQuery, true, data.ycqlAdminUsername,
+          data.ycqlCurrAdminPassword);
+    }
+
+    return ApiResponse.success("Updated security in DB.");
+  }
+
+  public Result createUserInDB(UUID customerUUID, UUID universeUUID) {
+    Universe universe;
+    try {
+      universe = checkCallValid(customerUUID, universeUUID);
+    } catch (RuntimeException e) {
+      return ApiResponse.error(BAD_REQUEST, e.getMessage());
+    }
+    Customer customer = Customer.get(customerUUID);
+    Form<DatabaseUserFormData> formData =
+        formFactory.form(DatabaseUserFormData.class).bindFromRequest();
+    if (formData.hasErrors()) {
+      return ApiResponse.error(BAD_REQUEST, formData.errorsAsJson());
+    }
+
+    DatabaseUserFormData data = formData.get();
+    if (data.username == null || data.password == null) {
+      return ApiResponse.error(BAD_REQUEST, "Need to provide username and password");
+    }
+    if (data.ysqlAdminUsername != null) {
+      if (data.dbName == null) {
+        return ApiResponse.error(BAD_REQUEST, "DB needs to be specified for YSQL user creation.");
+      }
+      RunQueryFormData ysqlQuery = new RunQueryFormData();
+      // Create user for customer YSQL.
+      ysqlQuery.query = String.format("CREATE USER %s SUPERUSER INHERIT CREATEROLE " +
+                                      "CREATEDB LOGIN REPLICATION BYPASSRLS PASSWORD '%s'",
+                                      data.username, data.password);
+      ysqlQuery.db_name = data.dbName;
+      JsonNode ysqlResponse = ysqlQueryExecutor.executeQuery(universe, ysqlQuery,
+                                                             data.ysqlAdminUsername,
+                                                             data.ysqlAdminPassword);
+      if (ysqlResponse.has("error")) {
+        return ApiResponse.error(BAD_REQUEST, ysqlResponse.asText("error"));
+      }
+    }
+
+    if (data.ycqlAdminUsername != null) {
+      // Create user for customer CQL.
+      RunQueryFormData ycqlQuery = new RunQueryFormData();
+      ycqlQuery.query = String.format("CREATE ROLE %s WITH SUPERUSER=true AND " +
+                                      "LOGIN=true AND PASSWORD='%s'",
+                                      data.username, data.password);
+      JsonNode ycqlResponse = ycqlQueryExecutor.executeQuery(universe, ycqlQuery, true,
+                                                             data.ycqlAdminUsername,
+                                                             data.ycqlAdminPassword);
+      if (ycqlResponse.has("error")) {
+        return ApiResponse.error(BAD_REQUEST, ycqlResponse.asText("error"));
+      }
+    }
+    return ApiResponse.success("Created user in DB.");
+  }
+
+  public Result runInShell(UUID customerUUID, UUID universeUUID) {
+    Universe universe;
+    try {
+      universe = checkCallValid(customerUUID, universeUUID);
+    } catch (RuntimeException e) {
+      return ApiResponse.error(BAD_REQUEST, e.getMessage());
+    }
+    Customer customer = Customer.get(customerUUID);
+
+    String securityLevel = (String)
+        configHelper.getConfig(ConfigHelper.ConfigType.Security).get("level");
+    if (securityLevel == null || !securityLevel.equals("insecure")) {
+      return ApiResponse.error(BAD_REQUEST, "run_in_shell not supported for this application");
+    }
+
+    Form<RunInShellFormData> formData =
+        formFactory.form(RunInShellFormData.class).bindFromRequest();
+
+    if (formData.hasErrors()) {
+      return ApiResponse.error(BAD_REQUEST, formData.errorsAsJson());
+    }
+
+    RunInShellFormData data = formData.get();
+    if (data.command == null && data.command_file == null) {
+      return ApiResponse.error(BAD_REQUEST, "Need to provide either command or command_file");
+    }
+
+    if (data.shell_location == null) {
+      Application application = Play.current().injector().instanceOf(Application.class);
+      data.shell_location = application.path().getAbsolutePath() + "/../bin";
+    }
+
+    List<String> shellArguments = new ArrayList<>();
+    String[] hostPort;
+    switch(data.shell_type) {
+      case YSQLSH:
+        String ysqlEndpoints = universe.getYSQLServerAddresses();
+        hostPort = ysqlEndpoints.split(",")[0].split(":");
+        shellArguments.addAll(ImmutableList.of(
+            data.shell_location  + "/" + data.shell_type.name().toLowerCase(),
+            "-h", hostPort[0], "-p", hostPort[1], "-d", data.db_name));
+        if (data.command != null) {
+          shellArguments.addAll(ImmutableList.of("-c", data.command));
+        } else {
+          shellArguments.addAll(ImmutableList.of("-f",
+              data.shell_location + "/" + data.command_file));
+        }
+        break;
+      case YCQLSH:
+        String ycqlEndpoints = universe.getYQLServerAddresses();
+        hostPort = ycqlEndpoints.split(",")[0].split(":");
+        shellArguments.addAll(ImmutableList.of(data.shell_location + "/" + "cqlsh",
+            hostPort[0], hostPort[1], "-k", data.db_name));
+        if (data.command != null) {
+          shellArguments.addAll(ImmutableList.of("-e", data.command));
+        } else {
+          shellArguments.addAll(ImmutableList.of("-f",
+              data.shell_location + "/" + data.command_file));
+        }
+        break;
+      default:
+        return ApiResponse.error(BAD_REQUEST, "Invalid shell_type " + data.shell_type.name());
+    }
+
+    ShellProcessHandler.ShellResponse response =
+        shellProcessHandler.run(shellArguments, new HashMap<>(), false);
+    Audit.createAuditEntry(ctx(), request(), Json.toJson(formData.data()));
+    return ApiResponse.success(response.message);
+ }
+
+  public Result runQuery(UUID customerUUID, UUID universeUUID) {
+    Universe universe;
+    try {
+      universe = checkCallValid(customerUUID, universeUUID);
+    } catch (RuntimeException e) {
+      return ApiResponse.error(BAD_REQUEST, e.getMessage());
+    }
+    Customer customer = Customer.get(customerUUID);
+
+    String securityLevel = (String)
+        configHelper.getConfig(ConfigHelper.ConfigType.Security).get("level");
+    if (securityLevel == null || !securityLevel.equals("insecure")) {
+      return ApiResponse.error(BAD_REQUEST, "run_query not supported for this application");
+    }
+
+    Form<RunQueryFormData> formData = formFactory.form(RunQueryFormData.class).bindFromRequest();
+
+    if (formData.hasErrors()) {
+      return ApiResponse.error(BAD_REQUEST, formData.errorsAsJson());
+    }
+
+    Audit.createAuditEntry(ctx(), request(),
+        Json.toJson(formData.data()));
+    return ApiResponse.success(
+        ysqlQueryExecutor.executeQuery(universe, formData.get())
+    );
   }
 
   /**
@@ -131,8 +377,9 @@ public class UniverseController extends AuthenticatedController {
           UniverseDefinitionTaskParams.ClusterOperationType.valueOf(clustOp.asText());
       UniverseDefinitionTaskParams taskParams = bindFormDataToTaskParams(formData);
 
+      taskParams.currentClusterType = currentClusterType;
       // TODO(Rahul): When we support multiple read only clusters, change clusterType to cluster uuid.
-      Cluster c = currentClusterType.equals(ClusterType.PRIMARY) ?
+      Cluster c = taskParams.currentClusterType .equals(ClusterType.PRIMARY) ?
           taskParams.getPrimaryCluster() : taskParams.getReadOnlyClusters().get(0);
       if (checkIfNodeParamsValid(taskParams, c)) {
         PlacementInfoUtil.updateUniverseDefinition(taskParams, customer.getCustomerId(), c.uuid, clusterOpType);
@@ -184,10 +431,11 @@ public class UniverseController extends AuthenticatedController {
    */
   public Result create(UUID customerUUID) {
     UniverseDefinitionTaskParams taskParams;
+    ObjectNode formData = null;
     try {
       LOG.info("Create for {}.", customerUUID);
       // Get the user submitted form data.
-      ObjectNode formData = (ObjectNode) request().body().asJson();
+      formData = (ObjectNode) request().body().asJson();
       taskParams = bindFormDataToTaskParams(formData);
     } catch (Throwable t) {
       return ApiResponse.error(BAD_REQUEST, t.getMessage());
@@ -208,6 +456,12 @@ public class UniverseController extends AuthenticatedController {
       for (Cluster c : taskParams.clusters) {
         Provider provider = Provider.find.byId(UUID.fromString(c.userIntent.provider));
         c.userIntent.providerType = CloudType.valueOf(provider.code);
+        if (
+          c.userIntent.providerType.equals(CloudType.onprem) &&
+            provider.getConfig().containsKey("USE_HOSTNAME")
+        ) {
+          c.userIntent.useHostname = Boolean.parseBoolean(provider.getConfig().get("USE_HOSTNAME"));
+        }
         updatePlacementInfo(taskParams.getNodesInCluster(c.uuid), c.placementInfo);
       }
 
@@ -229,6 +483,8 @@ public class UniverseController extends AuthenticatedController {
       if (primaryCluster != null) {
         if (primaryCluster.userIntent.providerType.equals(CloudType.kubernetes)) {
           taskType = TaskType.CreateKubernetesUniverse;
+          universe.setConfig(ImmutableMap.of(Universe.HELM2_LEGACY,
+                                             Universe.HelmLegacy.V3.toString()));
         }
 
         if (primaryCluster.userIntent.enableNodeToNodeEncrypt ||
@@ -237,39 +493,36 @@ public class UniverseController extends AuthenticatedController {
             taskParams.rootCA = CertificateHelper.createRootCA(taskParams.nodePrefix,
                     customerUUID, appConfig.getString("yb.storage.path"));
           }
+          // If client encryption is enabled, generate the client cert file for each node.
+          if (primaryCluster.userIntent.enableClientToNodeEncrypt) {
+            CertificateHelper.createClientCertificate(taskParams.rootCA,
+                String.format(CertificateHelper.CERT_PATH, appConfig.getString("yb.storage.path"),
+                              customerUUID.toString(), taskParams.rootCA.toString()),
+                CertificateHelper.DEFAULT_CLIENT, null, null);
+          }
           // Set the flag to mark the universe as using TLS enabled and therefore not allowing
           // insecure connections.
           taskParams.allowInsecure = false;
         }
 
-        if (primaryCluster.userIntent.enableEncryptionAtRest) {
-          // Generate encryption master key
-          byte[] data = null;
-          if (taskParams.encryptionAtRestConfig != null) {
-            boolean forceNewInstance = Boolean.parseBoolean(
-                    taskParams.encryptionAtRestConfig.get("force_new_instance")
-            );
-            String kmsProvider = taskParams.encryptionAtRestConfig.get("kms_provider");
-            EncryptionAtRestService keyService = EncryptionAtRestService
-                    .getServiceInstance(apiHelper, kmsProvider, forceNewInstance);
-            if (keyService != null) {
-              data = keyService.createAndRetrieveEncryptionKey(
-                      universe.universeUUID,
-                      customerUUID,
-                      taskParams.encryptionAtRestConfig
-              );
-            }
+        // TODO: (Daniel) - Move this out to an async task
+        if (primaryCluster.userIntent.enableVolumeEncryption
+                && primaryCluster.userIntent.providerType.equals(CloudType.aws)) {
+          byte[] cmkArnBytes = keyManager.generateUniverseKey(
+                  taskParams.encryptionAtRestConfig.kmsConfigUUID,
+                  universe.universeUUID,
+                  taskParams.encryptionAtRestConfig
+          );
+          if (cmkArnBytes == null || cmkArnBytes.length == 0) {
+            primaryCluster.userIntent.enableVolumeEncryption = false;
+          } else {
+            // TODO: (Daniel) - Update this to be inside of encryptionAtRestConfig
+            taskParams.cmkArn = new String(cmkArnBytes);
           }
-          // Default to Yugaware-generated encryption key if KMS not chosen/failed
-          if (data == null || data.length == 0) {
-            Random rd = new Random();
-            data = new byte[32];
-            rd.nextBytes(data);
-          }
-          taskParams.encryptionKeyFilePath = CertificateHelper.createEncryptionKeyFile(customerUUID, universe.universeUUID,
-                  data, appConfig.getString("yb.storage.path"));
         }
       }
+
+      universe.setConfig(ImmutableMap.of(Universe.TAKE_BACKUPS, "true"));
 
       // Submit the task to create the universe.
       UUID taskUUID = commissioner.submit(taskType, taskParams);
@@ -288,10 +541,78 @@ public class UniverseController extends AuthenticatedController {
 
       ObjectNode resultNode = (ObjectNode)universe.toJson();
       resultNode.put("taskUUID", taskUUID.toString());
+      Audit.createAuditEntry(ctx(), request(), formData, taskUUID);
       return Results.status(OK, resultNode);
     } catch (Throwable t) {
       LOG.error("Error creating universe", t);
       return ApiResponse.error(INTERNAL_SERVER_ERROR, t.getMessage());
+    }
+  }
+
+  public Result setUniverseKey(UUID customerUUID, UUID universeUUID) {
+    Universe universe;
+    try {
+      universe = checkCallValid(customerUUID, universeUUID);
+    } catch (RuntimeException e) {
+      return ApiResponse.error(BAD_REQUEST, e.getMessage());
+    }
+    Customer customer = Customer.get(customerUUID);
+
+    EncryptionAtRestKeyParams taskParams;
+    ObjectNode formData = null;
+    try {
+      LOG.info("Updating universe key {} for {}.", universeUUID, customerUUID);
+      // Get the user submitted form data.
+      formData = (ObjectNode) request().body().asJson();
+      taskParams = EncryptionAtRestKeyParams.bindFromFormData(universeUUID, formData);
+
+    } catch (Throwable t) {
+      return ApiResponse.error(BAD_REQUEST, t.getMessage());
+    }
+
+    try {
+      TaskType taskType = TaskType.SetUniverseKey;
+      taskParams.expectedUniverseVersion = universe.version;
+      UUID taskUUID = commissioner.submit(taskType, taskParams);
+      LOG.info("Submitted set universe key for {}:{}, task uuid = {}.",
+              universe.universeUUID, universe.name, taskUUID);
+
+      CustomerTask.TaskType customerTaskType = null;
+      switch (taskParams.encryptionAtRestConfig.opType) {
+        case ENABLE:
+          if (universe.getUniverseDetails().encryptionAtRestConfig.encryptionAtRestEnabled) {
+            customerTaskType = CustomerTask.TaskType.RotateEncryptionKey;
+          } else {
+            customerTaskType = CustomerTask.TaskType.EnableEncryptionAtRest;
+          }
+          break;
+        case DISABLE:
+          customerTaskType = CustomerTask.TaskType.DisableEncryptionAtRest;
+          break;
+        default:
+        case UNDEFINED:
+          break;
+      }
+
+      // Add this task uuid to the user universe.
+      CustomerTask.create(customer,
+              universe.universeUUID,
+              taskUUID,
+              CustomerTask.TargetType.Universe,
+              customerTaskType,
+              universe.name);
+      LOG.info("Saved task uuid " + taskUUID + " in customer tasks table for universe " +
+              universe.universeUUID + ":" + universe.name);
+
+      ObjectNode resultNode = (ObjectNode)universe.toJson();
+      resultNode.put("taskUUID", taskUUID.toString());
+      Audit.createAuditEntry(ctx(), request(),
+        Json.toJson(formData), taskUUID);
+      return Results.status(OK, resultNode);
+    } catch (Exception e) {
+      String errMsg = "Error occurred attempting to set the universe encryption key";
+      LOG.error(errMsg, e);
+      return ApiResponse.error(BAD_REQUEST, errMsg);
     }
   }
 
@@ -302,31 +623,24 @@ public class UniverseController extends AuthenticatedController {
    * @return result of the universe update operation.
    */
   public Result update(UUID customerUUID, UUID universeUUID) {
+    Universe universe;
+    try {
+      universe = checkCallValid(customerUUID, universeUUID);
+    } catch (RuntimeException e) {
+      return ApiResponse.error(BAD_REQUEST, e.getMessage());
+    }
+    Customer customer = Customer.get(customerUUID);
+
     UniverseDefinitionTaskParams taskParams;
+    ObjectNode formData = null;
     try {
       LOG.info("Update {} for {}.", customerUUID, universeUUID);
       // Get the user submitted form data.
 
-      ObjectNode formData = (ObjectNode) request().body().asJson();
+      formData = (ObjectNode) request().body().asJson();
       taskParams = bindFormDataToTaskParams(formData);
     } catch (Throwable t) {
       return ApiResponse.error(BAD_REQUEST, t.getMessage());
-    }
-    // Verify the customer with this universe is present.
-    Customer customer = Customer.get(customerUUID);
-    if (customer == null) {
-      return ApiResponse.error(BAD_REQUEST, "Invalid Customer UUID: " + customerUUID);
-    }
-
-    // Get the universe. This makes sure that a universe of this name does exist
-    // for this customer id.
-    Universe universe = null;
-    try {
-      universe = Universe.get(universeUUID);
-    } catch (RuntimeException re) {
-      String errMsg= "Invalid universe UUID: " + universeUUID;
-      LOG.error(errMsg);
-      return ApiResponse.error(BAD_REQUEST, errMsg);
     }
 
     if (!universe.getUniverseDetails().isUniverseEditable()) {
@@ -362,12 +676,15 @@ public class UniverseController extends AuthenticatedController {
         uuid = primaryCluster.uuid;
         placementInfo = primaryCluster.placementInfo;
 
+        Map<String, String> universeConfig = universe.getConfig();
         if (primaryCluster.userIntent.providerType.equals(CloudType.kubernetes)) {
           taskType = TaskType.EditKubernetesUniverse;
-        }
-        if (primaryCluster.userIntent.enableEncryptionAtRest) {
-          taskParams.encryptionKeyFilePath = CertificateHelper.getEncryptionFile(customerUUID, universe.universeUUID,
-                  appConfig.getString("yb.storage.path"));
+          if (!universeConfig.containsKey(Universe.HELM2_LEGACY)) {
+            return ApiResponse.error(BAD_REQUEST, "Cannot perform an edit operation on universe " +
+                                     universeUUID + " as it is not helm 3 compatible. " +
+                                     "Manually migrate the deployment to helm3 " +
+                                     "and then mark the universe as helm 3 compatible.");
+          }
         }
       }
 
@@ -385,14 +702,16 @@ public class UniverseController extends AuthenticatedController {
       CustomerTask.create(customer,
                           universe.universeUUID,
                           taskUUID,
-                          primaryCluster == null 
-                            ? CustomerTask.TargetType.Cluster 
+                          primaryCluster == null
+                            ? CustomerTask.TargetType.Cluster
                             : CustomerTask.TargetType.Universe,
                           CustomerTask.TaskType.Update,
                           universe.name);
       LOG.info("Saved task uuid {} in customer tasks table for universe {} : {}.", taskUUID,
                universe.universeUUID, universe.name);
       ObjectNode resultNode = (ObjectNode)universe.toJson();
+      Audit.createAuditEntry(ctx(), request(),
+        Json.toJson(formData), taskUUID);
       resultNode.put("taskUUID", taskUUID.toString());
       return Results.status(OK, resultNode);
     } catch (Throwable t) {
@@ -428,39 +747,144 @@ public class UniverseController extends AuthenticatedController {
     return ApiResponse.success(universes);
   }
 
-  public Result index(UUID customerUUID, UUID universeUUID) {
-    Customer customer = Customer.get(customerUUID);
-    if (customer == null) {
-      return ApiResponse.error(BAD_REQUEST, "Invalid Customer UUID: " + customerUUID);
-    }
+  /**
+   * Mark whether the universe needs to be backed up or not.
+   *
+   * @return Result
+   */
+  public Result setBackupFlag(UUID customerUUID, UUID universeUUID) {
+    Universe universe;
     try {
-      Universe universe = Universe.get(universeUUID);
-      return Results.status(OK, universe.toJson());
+      universe = checkCallValid(customerUUID, universeUUID);
     } catch (RuntimeException e) {
-      return ApiResponse.error(BAD_REQUEST, "Invalid Universe UUID: " + universeUUID);
+      return ApiResponse.error(BAD_REQUEST, e.getMessage());
     }
+    Customer customer = Customer.get(customerUUID);
+
+    String active = "false";
+    Map<String, String> config = new HashMap<>();
+    try {
+      if (request().getQueryString("markActive") != null) {
+        active = request().getQueryString("markActive");
+        config.put(Universe.TAKE_BACKUPS, active);
+      } else {
+        return ApiResponse.error(BAD_REQUEST, "Invalid Query: Need to specify markActive value");
+      }
+      universe.setConfig(config);
+      Audit.createAuditEntry(ctx(), request());
+      return ApiResponse.success();
+    } catch (Exception e) {
+      return ApiResponse.error(INTERNAL_SERVER_ERROR, e);
+    }
+  }
+
+  /**
+   * Mark whether the universe has been made helm compatible.
+   *
+   * @return Result
+   */
+  public Result setHelm3Compatible(UUID customerUUID, UUID universeUUID) {
+    Universe universe;
+    try {
+      universe = checkCallValid(customerUUID, universeUUID);
+    } catch (RuntimeException e) {
+      return ApiResponse.error(BAD_REQUEST, e.getMessage());
+    }
+    Customer customer = Customer.get(customerUUID);
+
+    // Check if the provider is k8s and that we haven't already marked this universe
+    // as helm compatible.
+    Map<String, String> universeConfig = universe.getConfig();
+    if (universeConfig.containsKey(Universe.HELM2_LEGACY)) {
+      return ApiResponse.error(BAD_REQUEST, "Universe was already marked as helm3 compatible.");
+    }
+    Cluster primaryCluster = universe.getUniverseDetails().getPrimaryCluster();
+    if (!primaryCluster.userIntent.providerType.equals(CloudType.kubernetes)) {
+      return ApiResponse.error(BAD_REQUEST, "Only applicable for k8s universes.");
+    }
+
+    try {
+      Map<String, String> config = new HashMap<>();
+      config.put(Universe.HELM2_LEGACY, Universe.HelmLegacy.V2TO3.toString());
+      universe.setConfig(config);
+      Audit.createAuditEntry(ctx(), request());
+      return ApiResponse.success();
+    } catch (Exception e) {
+      return ApiResponse.error(INTERNAL_SERVER_ERROR, e);
+    }
+  }
+
+  public Result configureAlerts(UUID customerUUID, UUID universeUUID) {
+    Universe universe;
+    try {
+      universe = checkCallValid(customerUUID, universeUUID);
+    } catch (RuntimeException e) {
+      return ApiResponse.error(BAD_REQUEST, e.getMessage());
+    }
+    Customer customer = Customer.get(customerUUID);
+
+    Map<String, String> config = new HashMap<>();
+    try {
+      Form<AlertConfigFormData> formData =
+        formFactory.form(AlertConfigFormData.class).bindFromRequest();
+      if (formData.hasErrors()) {
+          return ApiResponse.error(BAD_REQUEST, formData.errorsAsJson());
+      }
+
+      AlertConfigFormData alertConfig = formData.get();
+      long disabledUntilSecs = 0;
+      if (alertConfig.disabled) {
+        if (null == alertConfig.disablePeriodSecs) {
+          disabledUntilSecs = Long.MAX_VALUE;
+        } else {
+          disabledUntilSecs = (System.currentTimeMillis() / 1000) + alertConfig.disablePeriodSecs;
+        }
+        LOG.info(String.format(
+          "Will disable alerts for universe %s until unix time %d [ %s ].",
+          universeUUID,
+          disabledUntilSecs,
+          Util.unixTimeToString(disabledUntilSecs)
+        ));
+      } else {
+        LOG.info(String.format(
+          "Will enable alerts for universe %s [unix time  = %d].",
+          universeUUID,
+          disabledUntilSecs
+        ));
+      }
+      config.put(Universe.DISABLE_ALERTS_UNTIL, Long.toString(disabledUntilSecs));
+      universe.setConfig(config);
+
+      return ApiResponse.success();
+    } catch (Exception e) {
+      return ApiResponse.error(INTERNAL_SERVER_ERROR, e);
+    }
+  }
+
+  public Result index(UUID customerUUID, UUID universeUUID) {
+    Universe universe;
+    try {
+      universe = checkCallValid(customerUUID, universeUUID);
+    } catch (RuntimeException e) {
+      return ApiResponse.error(BAD_REQUEST, e.getMessage());
+    }
+    return Results.status(OK, universe.toJson());
   }
 
   public Result destroy(UUID customerUUID, UUID universeUUID) {
     LOG.info("Destroy universe, customer uuid: {}, universeUUID: {} ", customerUUID, universeUUID);
 
+    Universe universe;
+    try {
+      universe = checkCallValid(customerUUID, universeUUID);
+    } catch (RuntimeException e) {
+      return ApiResponse.error(BAD_REQUEST, e.getMessage());
+    }
+    Customer customer = Customer.get(customerUUID);
+
     Boolean isForceDelete = false;
     if (request().getQueryString("isForceDelete") != null) {
       isForceDelete = Boolean.valueOf(request().getQueryString("isForceDelete"));
-    }
-
-    // Verify the customer with this universe is present.
-    Customer customer = Customer.get(customerUUID);
-    if (customer == null) {
-      return ApiResponse.error(BAD_REQUEST, "Invalid Customer UUID: " + customerUUID);
-    }
-
-    Universe universe;
-    // Make sure the universe exists, this method will throw an exception if it does not.
-    try {
-      universe = Universe.get(universeUUID);
-    } catch (RuntimeException e) {
-      return ApiResponse.error(BAD_REQUEST, "No universe found with UUID: " + universeUUID);
     }
 
     // Create the Commissioner task to destroy the universe.
@@ -472,7 +896,8 @@ public class UniverseController extends AuthenticatedController {
     taskParams.isForceDelete = isForceDelete;
     // Submit the task to destroy the universe.
     TaskType taskType = TaskType.DestroyUniverse;
-    Cluster primaryCluster = universe.getUniverseDetails().getPrimaryCluster();
+    UniverseDefinitionTaskParams universeDetails = universe.getUniverseDetails();
+    Cluster primaryCluster = universeDetails.getPrimaryCluster();
     if (primaryCluster.userIntent.providerType.equals(CloudType.kubernetes)) {
       taskType = TaskType.DestroyKubernetesUniverse;
     }
@@ -497,6 +922,7 @@ public class UniverseController extends AuthenticatedController {
 
     ObjectNode response = Json.newObject();
     response.put("taskUUID", taskUUID.toString());
+    Audit.createAuditEntry(ctx(), request(), taskUUID);
     return ApiResponse.success(response);
   }
 
@@ -505,26 +931,23 @@ public class UniverseController extends AuthenticatedController {
    * @return result of the cluster create operation.
    */
   public Result clusterCreate(UUID customerUUID, UUID universeUUID) {
+    Universe universe;
+    try {
+      universe = checkCallValid(customerUUID, universeUUID);
+    } catch (RuntimeException e) {
+      return ApiResponse.error(BAD_REQUEST, e.getMessage());
+    }
+    Customer customer = Customer.get(customerUUID);
+
     UniverseDefinitionTaskParams taskParams;
+    ObjectNode formData = null;
     try {
       LOG.info("Create cluster for {} in {}.", customerUUID, universeUUID);
       // Get the user submitted form data.
-      ObjectNode formData = (ObjectNode) request().body().asJson();
+      formData = (ObjectNode) request().body().asJson();
       taskParams = bindFormDataToTaskParams(formData);
     } catch (Throwable t) {
       return ApiResponse.error(BAD_REQUEST, t.getMessage());
-    }
-    // Verify the customer with this universe is present.
-    Customer customer = Customer.get(customerUUID);
-    if (customer == null) {
-      return ApiResponse.error(BAD_REQUEST, "Invalid Customer UUID: " + customerUUID);
-    }
-
-    Universe universe = null;
-    try {
-      universe = Universe.get(universeUUID);
-    } catch (RuntimeException e) {
-      return ApiResponse.error(BAD_REQUEST, "No universe found with UUID: " + universeUUID);
     }
 
     try {
@@ -588,6 +1011,7 @@ public class UniverseController extends AuthenticatedController {
 
       ObjectNode resultNode = (ObjectNode)universe.toJson();
       resultNode.put("taskUUID", taskUUID.toString());
+      Audit.createAuditEntry(ctx(), request(), formData, taskUUID);
       return Results.status(OK, resultNode);
     } catch (Throwable t) {
       LOG.error("Error creating cluster", t);
@@ -600,18 +1024,14 @@ public class UniverseController extends AuthenticatedController {
    * @return result of the cluster delete operation.
    */
   public Result clusterDelete(UUID customerUUID, UUID universeUUID, UUID clusterUUID) {
-    // Verify the customer with this universe is present.
-    Customer customer = Customer.get(customerUUID);
-    if (customer == null) {
-      return ApiResponse.error(BAD_REQUEST, "Invalid Customer UUID: " + customerUUID);
-    }
-
     Universe universe;
     try {
-      universe = Universe.get(universeUUID);
+      universe = checkCallValid(customerUUID, universeUUID);
     } catch (RuntimeException e) {
-      return ApiResponse.error(BAD_REQUEST, "No universe found with UUID: " + universeUUID);
+      return ApiResponse.error(BAD_REQUEST, e.getMessage());
     }
+    Customer customer = Customer.get(customerUUID);
+
 
     List<Cluster> existingReadOnlyClusters = universe.getUniverseDetails().getReadOnlyClusters();
     if (existingReadOnlyClusters.size() != 1) {
@@ -660,6 +1080,7 @@ public class UniverseController extends AuthenticatedController {
 
       ObjectNode resultNode = (ObjectNode)universe.toJson();
       resultNode.put("taskUUID", taskUUID.toString());
+      Audit.createAuditEntry(ctx(), request(), taskUUID);
       return Results.status(OK, resultNode);
     } catch (Throwable t) {
       LOG.error("Error deleting cluster ", t);
@@ -668,19 +1089,14 @@ public class UniverseController extends AuthenticatedController {
   }
 
   public Result universeCost(UUID customerUUID, UUID universeUUID) {
-    // Verify the customer with this universe is present.
-    Customer customer = Customer.get(customerUUID);
-    if (customer == null) {
-      return ApiResponse.error(BAD_REQUEST, "Invalid Customer UUID: " + customerUUID);
-    }
-
     Universe universe;
-    // Make sure the universe exists, this method will throw an exception if it does not.
     try {
-      universe = Universe.get(universeUUID);
+      universe = checkCallValid(customerUUID, universeUUID);
     } catch (RuntimeException e) {
-      return ApiResponse.error(BAD_REQUEST, "No universe found with UUID: " + universeUUID);
+      return ApiResponse.error(BAD_REQUEST, e.getMessage());
     }
+    Customer customer = Customer.get(customerUUID);
+
     try {
       return ApiResponse.success(Json.toJson(UniverseResourceDetails.create(universe.getNodes(),
           universe.getUniverseDetails())));
@@ -721,32 +1137,27 @@ public class UniverseController extends AuthenticatedController {
   public Result upgrade(UUID customerUUID, UUID universeUUID) {
     LOG.info("Upgrade {} for {}.", customerUUID, universeUUID);
 
-    // Verify the customer with this universe is present.
-    Customer customer = Customer.get(customerUUID);
-    if (customer == null) {
-      return ApiResponse.error(BAD_REQUEST, "Invalid Customer UUID: " + customerUUID);
-    }
-
-    // Get the universe. This makes sure that a universe of this name does exist
-    // for this customer id.
-    Universe universe = null;
+    Universe universe;
     try {
-      universe = Universe.get(universeUUID);
+      universe = checkCallValid(customerUUID, universeUUID);
     } catch (RuntimeException e) {
-      return ApiResponse.error(BAD_REQUEST, "No universe found with UUID: " + universeUUID);
+      return ApiResponse.error(BAD_REQUEST, e.getMessage());
     }
+    Customer customer = Customer.get(customerUUID);
 
-    // Bind rolling restart params
-    RollingRestartParams taskParams;
+    // Bind upgrade params
+    UpgradeParams taskParams;
+    ObjectNode formData = null;
     try {
-      ObjectNode formData = (ObjectNode) request().body().asJson();
-      taskParams = (RollingRestartParams) bindFormDataToTaskParams(formData, true);
+      formData = (ObjectNode) request().body().asJson();
+      taskParams = (UpgradeParams) bindFormDataToTaskParams(formData, true);
 
       if (taskParams.taskType == null) {
         return ApiResponse.error(BAD_REQUEST, "task type is required");
       }
 
-      if (taskParams.rollingUpgrade && universe.nodesInTransit()) {
+      if (taskParams.upgradeOption == UpgradeParams.UpgradeOption.ROLLING_UPGRADE &&
+          universe.nodesInTransit()) {
         return ApiResponse.error(BAD_REQUEST, "Cannot perform rolling upgrade of universe " +
                                  universeUUID + " as it has nodes in one of " +
                                  NodeDetails.IN_TRANSIT_STATES + " states.");
@@ -776,8 +1187,7 @@ public class UniverseController extends AuthenticatedController {
           break;
         case GFlags:
           customerTaskType = CustomerTask.TaskType.UpgradeGflags;
-          if ((taskParams.masterGFlags == null || taskParams.masterGFlags.isEmpty()) &&
-              (taskParams.tserverGFlags == null || taskParams.tserverGFlags.isEmpty())) {
+          if (taskParams.masterGFlags == null && taskParams.tserverGFlags == null) {
             return ApiResponse.error(
                 BAD_REQUEST,
                 "gflags param is required for taskType: " + taskParams.taskType);
@@ -794,15 +1204,22 @@ public class UniverseController extends AuthenticatedController {
       }
 
       LOG.info("Got task type {}", customerTaskType.toString());
-
       taskParams.universeUUID = universe.universeUUID;
       taskParams.expectedUniverseVersion = universe.version;
+
       LOG.info("Found universe {} : name={} at version={}.",
         universe.universeUUID, universe.name, universe.version);
 
+      Map<String, String> universeConfig = universe.getConfig();
       TaskType taskType = TaskType.UpgradeUniverse;
       if (taskParams.getPrimaryCluster().userIntent.providerType.equals(CloudType.kubernetes)) {
         taskType = TaskType.UpgradeKubernetesUniverse;
+        if (!universeConfig.containsKey(Universe.HELM2_LEGACY)) {
+          return ApiResponse.error(BAD_REQUEST, "Cannot perform upgrade operation on universe. " +
+                                   universeUUID + " as it is not helm 3 compatible. " +
+                                   "Manually migrate the deployment to helm3 " +
+                                   "and then mark the universe as helm 3 compatible.");
+        }
       }
 
       UUID taskUUID = commissioner.submit(taskType, taskParams);
@@ -820,6 +1237,7 @@ public class UniverseController extends AuthenticatedController {
         universe.universeUUID, universe.name);
       ObjectNode resultNode = Json.newObject();
       resultNode.put("taskUUID", taskUUID.toString());
+      Audit.createAuditEntry(ctx(), request(), formData, taskUUID);
       return Results.status(OK, resultNode);
     } catch (Throwable t) {
       LOG.error("Error updating universe", t);
@@ -833,19 +1251,13 @@ public class UniverseController extends AuthenticatedController {
    * @return result of the universe status operation.
    */
   public Result status(UUID customerUUID, UUID universeUUID) {
-    // Verify the customer with this universe is present.
-    Customer customer = Customer.get(customerUUID);
-    if (customer == null) {
-      return ApiResponse.error(BAD_REQUEST, "Invalid Customer UUID: " + customerUUID);
-    }
-
-    // Make sure the universe exists, this method will throw an exception if it does not.
     Universe universe;
     try {
-      universe = Universe.get(universeUUID);
+      universe = checkCallValid(customerUUID, universeUUID);
     } catch (RuntimeException e) {
-      return ApiResponse.error(BAD_REQUEST, "No universe found with UUID: " + universeUUID);
+      return ApiResponse.error(BAD_REQUEST, e.getMessage());
     }
+    Customer customer = Customer.get(customerUUID);
 
     // Get alive status
     try {
@@ -864,19 +1276,14 @@ public class UniverseController extends AuthenticatedController {
    * @return result of the checker script
    */
   public Result healthCheck(UUID customerUUID, UUID universeUUID) {
-    // Verify the customer with this universe is present.
-    Customer customer = Customer.get(customerUUID);
-    if (customer == null) {
-      return ApiResponse.error(BAD_REQUEST, "Invalid Customer UUID: " + customerUUID);
-    }
-
-    // Make sure the universe exists, this method will throw an exception if it does not.
     Universe universe;
     try {
-      universe = Universe.get(universeUUID);
+      universe = checkCallValid(customerUUID, universeUUID);
     } catch (RuntimeException e) {
-      return ApiResponse.error(BAD_REQUEST, "No universe found with UUID: " + universeUUID);
+      return ApiResponse.error(BAD_REQUEST, e.getMessage());
     }
+    Customer customer = Customer.get(customerUUID);
+
 
     // Get alive status
     try {
@@ -903,19 +1310,14 @@ public class UniverseController extends AuthenticatedController {
    * @return The private IP of the master leader.
    */
   public Result getMasterLeaderIP(UUID customerUUID, UUID universeUUID) {
-    // Verify the customer with this universe is present.
-    Customer customer = Customer.get(customerUUID);
-    if (customer == null) {
-      return ApiResponse.error(BAD_REQUEST, "Invalid Customer UUID: " + customerUUID);
-    }
-
-    // Make sure the universe exists, this method will throw an exception if it does not.
     Universe universe;
     try {
-      universe = Universe.get(universeUUID);
+      universe = checkCallValid(customerUUID, universeUUID);
     } catch (RuntimeException e) {
-      return ApiResponse.error(BAD_REQUEST, "No universe found with UUID: " + universeUUID);
+      return ApiResponse.error(BAD_REQUEST, e.getMessage());
     }
+    Customer customer = Customer.get(customerUUID);
+
     final String hostPorts = universe.getMasterAddresses();
     String certificate = universe.getCertificate();
     YBClient client = null;
@@ -932,6 +1334,79 @@ public class UniverseController extends AuthenticatedController {
     }
   }
 
+  public Result updateDiskSize(UUID customerUUID, UUID universeUUID) {
+    LOG.info("Disk Size Increase {} for {}.", customerUUID, universeUUID);
+
+    Universe universe;
+    try {
+      universe = checkCallValid(customerUUID, universeUUID);
+    } catch (RuntimeException e) {
+      return ApiResponse.error(BAD_REQUEST, e.getMessage());
+    }
+    Customer customer = Customer.get(customerUUID);
+
+    // Bind disk size increase data.
+    DiskIncreaseFormData taskParams;
+    ObjectNode formData = null;
+    try {
+      formData = (ObjectNode) request().body().asJson();
+      taskParams = (DiskIncreaseFormData) bindFormDataToTaskParams(formData, false, true);
+
+      if (taskParams.size == 0) {
+        return ApiResponse.error(BAD_REQUEST, "Size cannot be 0.");
+      }
+    } catch (Throwable t) {
+      return ApiResponse.error(BAD_REQUEST, t.getMessage());
+    }
+
+    try {
+      UserIntent primaryIntent = taskParams.getPrimaryCluster().userIntent;
+      if (taskParams.size <= primaryIntent.deviceInfo.volumeSize) {
+        return ApiResponse.error(BAD_REQUEST, "Size can only be increased.");
+      }
+      if (primaryIntent.deviceInfo.storageType == PublicCloudConstants.StorageType.Scratch) {
+        return ApiResponse.error(BAD_REQUEST, "Scratch type disk cannot be modified.");
+      }
+      if (primaryIntent.instanceType.startsWith("i3")) {
+        return ApiResponse.error(BAD_REQUEST, "Cannot modify i3 instance volumes.");
+      }
+
+      primaryIntent.deviceInfo.volumeSize = taskParams.size;
+      taskParams.universeUUID = universe.universeUUID;
+      taskParams.expectedUniverseVersion = universe.version;
+      LOG.info("Found universe {} : name={} at version={}.",
+        universe.universeUUID, universe.name, universe.version);
+
+      TaskType taskType = TaskType.UpdateDiskSize;
+      if (taskParams.getPrimaryCluster().userIntent.providerType.equals(CloudType.kubernetes)) {
+        return ApiResponse.error(BAD_REQUEST, "Kubernetes disk size increase not yet supported.");
+      }
+
+      UUID taskUUID = commissioner.submit(taskType, taskParams);
+      LOG.info("Submitted update disk universe for {} : {}, task uuid = {}.",
+        universe.universeUUID, universe.name, taskUUID);
+
+      CustomerTask.TaskType customerTaskType = CustomerTask.TaskType.UpdateDiskSize;
+
+      // Add this task uuid to the user universe.
+      CustomerTask.create(customer,
+        universe.universeUUID,
+        taskUUID,
+        CustomerTask.TargetType.Universe,
+        customerTaskType,
+        universe.name);
+      LOG.info("Saved task uuid {} in customer tasks table for universe {} : {}.", taskUUID,
+        universe.universeUUID, universe.name);
+      ObjectNode resultNode = Json.newObject();
+      resultNode.put("taskUUID", taskUUID.toString());
+      Audit.createAuditEntry(ctx(), request(), formData, taskUUID);
+      return Results.status(OK, resultNode);
+    } catch (Throwable t) {
+      LOG.error("Error updating disk for universe", t);
+      return ApiResponse.error(INTERNAL_SERVER_ERROR, t.getMessage());
+    }
+  }
+
   private void markAllUniverseTasksAsCompleted(UUID universeUUID) {
     List<CustomerTask> existingTasks = CustomerTask.findIncompleteByTargetUUID(universeUUID);
     if (existingTasks == null) {
@@ -942,6 +1417,7 @@ public class UniverseController extends AuthenticatedController {
       TaskInfo taskInfo = TaskInfo.get(task.getTaskUUID());
       if (taskInfo != null) {
         taskInfo.setTaskState(TaskInfo.State.Failure);
+        taskInfo.save();
       }
     }
   }
@@ -950,27 +1426,45 @@ public class UniverseController extends AuthenticatedController {
     return bindFormDataToTaskParams(formData, false);
   }
 
-  private UniverseDefinitionTaskParams bindFormDataToTaskParams(ObjectNode formData, boolean isRolling) throws Exception {
+  private UniverseDefinitionTaskParams bindFormDataToTaskParams(
+          ObjectNode formData, boolean isUpgrade) throws Exception {
+    return bindFormDataToTaskParams(formData, isUpgrade, false);
+  }
+
+  private UniverseDefinitionTaskParams bindFormDataToTaskParams(ObjectNode formData,
+                                                                boolean isUpgrade,
+                                                                boolean isDisk) throws Exception {
     ObjectMapper mapper = new ObjectMapper();
     ArrayNode nodeSetArray = null;
-    Map<String, String> configMap = null;
+    EncryptionAtRestConfig encryptionConfig = new EncryptionAtRestConfig();
     int expectedUniverseVersion = -1;
-    if (formData.get("nodeDetailsSet") != null) {
+    if (formData.get("nodeDetailsSet") != null && formData.get("nodeDetailsSet").size() > 0) {
       nodeSetArray = (ArrayNode)formData.get("nodeDetailsSet");
       formData.remove("nodeDetailsSet");
     }
     if (formData.get("expectedUniverseVersion") != null) {
       expectedUniverseVersion = formData.get("expectedUniverseVersion").asInt();
     }
+
     JsonNode config = formData.get("encryptionAtRestConfig");
     if (config != null) {
       formData.remove("encryptionAtRestConfig");
-      configMap = mapper.treeToValue(config, Map.class);
+      if (config.get("configUUID") != null) {
+        encryptionConfig.kmsConfigUUID = UUID.fromString(config.get("configUUID").asText());
+        if (config.get("type") != null) {
+          encryptionConfig.type = Enum.valueOf(KeyType.class, config.get("type").asText());
+        }
+        if (config.get("key_op") != null) {
+          encryptionConfig.opType = Enum.valueOf(OpType.class, config.get("key_op").asText());
+        }
+      }
     }
     UniverseDefinitionTaskParams taskParams = null;
     List<Cluster> clusters = mapClustersInParams(formData);
-    if (isRolling) {
-      taskParams = mapper.treeToValue(formData, RollingRestartParams.class);
+    if (isUpgrade) {
+      taskParams = mapper.treeToValue(formData, UpgradeParams.class);
+    } else if (isDisk){
+      taskParams = mapper.treeToValue(formData, DiskIncreaseFormData.class);
     } else {
       taskParams = mapper.treeToValue(formData, UniverseDefinitionTaskParams.class);
     }
@@ -982,7 +1476,7 @@ public class UniverseController extends AuthenticatedController {
       }
     }
     taskParams.expectedUniverseVersion = expectedUniverseVersion;
-    taskParams.encryptionAtRestConfig = configMap;
+    taskParams.encryptionAtRestConfig = encryptionConfig;
     return taskParams;
   }
 

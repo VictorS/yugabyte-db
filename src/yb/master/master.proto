@@ -170,6 +170,17 @@ message TableIdentifierPB {
   optional NamespaceIdentifierPB namespace = 3;
 }
 
+message TablegroupIdentifierPB {
+  // The tablegroup ID to fetch info.
+  optional bytes id = 1;
+
+  // The tablegroup name to fetch info.
+  optional string name = 2;
+
+  // The namespace that the tablegroup is in
+  optional bytes namespace_id = 3;
+}
+
 // This represents one instance of a placement constraint for a table. It is
 // used to dictate what is the minimum number of expected replicas in a certain
 // cloud/region/zone combo.
@@ -258,6 +269,10 @@ message SysRowEntry {
   optional bytes data = 3;
 }
 
+message SysRowEntries {
+  repeated SysRowEntry entries = 1;
+}
+
 // The on-disk entry in the sys.catalog table ("metadata" column) for
 // tablets entries.
 message SysTabletsEntryPB {
@@ -288,6 +303,21 @@ message SysTabletsEntryPB {
   required bytes table_id = 6;
   // Table ids for all the tables on this tablet.
   repeated bytes table_ids = 8;
+
+  // True if the tablet is colocated.
+  optional bool colocated = 9 [ default = false ];
+
+  // Replaced by the map below.
+  optional bytes DEPRECATED_backfilled_until = 10;
+
+  // For tablets which are results of splitting we set this to split parent split_depth + 1.
+  optional uint64 split_depth = 11;
+
+  // If the tablet is in the backfilling state, this is used to keep track
+  // of how far along backfill has completed.
+  // Key corresponds to the table_id for the index table. Value is encoded as
+  // the DocKey for the next row to be backfilled.
+  map<string, bytes> backfilled_until = 12;
 }
 
 // The on-disk entry in the sys.catalog table ("metadata" column) for
@@ -327,6 +357,9 @@ message SysTablesEntryPB {
   // The table's partitioning schema.
   optional PartitionSchemaPB partition_schema = 9;
 
+  // The table's partitions version. Incremented each time partitions change.
+  optional uint32 partitions_version = 28;
+
   // The next column ID to assign to newly added columns in this table.
   // This prevents column ID reuse.
   optional int32 next_column_id = 8;
@@ -355,10 +388,27 @@ message SysTablesEntryPB {
   optional bool is_pg_shared_table = 16 [ default = false ]; // Is this a shared table?
 
   optional uint32 wal_retention_secs = 24;
+
+  optional bool colocated = 25 [ default = false ]; // Is this a colocated table?
+
+  // For index backfill/schema related changes.
+  // When a schema change is going on, we want to make sure that the master returns the "older"
+  // fully applied version until all the tablets have moved on to the newer version.
+  optional uint32 fully_applied_schema_version = 23;
+  repeated IndexInfoPB fully_applied_indexes = 26;
+  optional IndexInfoPB fully_applied_index_info = 27;
 }
 
 // The data part of a SysRowEntry in the sys.catalog table for a namespace.
 message SysNamespaceEntryPB {
+  enum State {
+    UNKNOWN = 0;    // Unset or bad data. Unexpected state.
+    PREPARING = 1;  // Creating. Transitive State. Possible Next States: [RUNNING, FAILED].
+    FAILED = 2;     // Creation Failed. Permanent State.
+    RUNNING = 3;    // Live. Permanent State. Possible Next States: [FAILED, DELETING].
+    DELETING = 4;   // Delete Requested. Transitive State. Possible Next States: [DELETED].
+    DELETED = 5;    // Delete Finished on TServers or Tombstone. Final State before erasure.
+  }
   // Note: The id of the namespace is not stored here as it is already part of
   // SysRowEntry's id component.
 
@@ -370,6 +420,11 @@ message SysNamespaceEntryPB {
 
   // For Postgres:
   optional uint32 next_pg_oid = 3; // Next oid to assign.
+
+  // True if the namespace is colocated.
+  optional bool colocated = 4 [ default = false ];
+
+  optional State state = 5 [ default = UNKNOWN ];
 }
 
 // The data part of a SysRowEntry in the sys.catalog table for a User Defined Type.
@@ -388,8 +443,15 @@ message SysRedisConfigEntryPB {
 
 // The data part of a SysRowEntry in the sys.catalog table for a CDC stream.
 message SysCDCStreamEntryPB {
+  enum State {
+    ACTIVE = 0;
+    DELETING = 1;
+    // Currently DELETED is not being used because we delete streams entries from sys catalog.
+    DELETED = 2;
+  }
   optional string table_id = 1;
   repeated CDCStreamOptionsPB options = 2;
+  optional State state = 3 [default = ACTIVE];
 }
 
 // The data part of a SysRowEntry in the sys.catalog table for a universe replication record.
@@ -406,6 +468,8 @@ message SysUniverseReplicationEntryPB {
     // creating CDC streams, starting subscribers. If any of these fail, we set the universe
     // replication state to FAILED.
     FAILED = 3;
+    // Disabled.
+    DISABLED = 6;
     // Deleted.
     DELETED = 4;
     // Error while cleaning up state of deleted entry. This indicates that universe replication has
@@ -432,6 +496,8 @@ message SysUniverseReplicationEntryPB {
 message ChangeEncryptionInfoRequestPB {
   optional bool encryption_enabled = 1;
   optional string key_path = 2;
+  optional string version_id = 3;
+  optional bool in_memory = 4;
 }
 
 message ChangeEncryptionInfoResponsePB {
@@ -448,10 +514,38 @@ message IsEncryptionEnabledResponsePB {
 }
 
 message EncryptionInfoPB {
-  optional bool encryption_enabled = 1 [default = false];
+  optional bool encryption_enabled = 1;
   optional bytes universe_key_registry_encoded = 2;
   optional string key_path = 3;
+  optional string latest_version_id = 4;
+  optional bool key_in_memory = 5;
 }
+
+message AddUniverseKeysRequestPB {
+  optional UniverseKeysPB universe_keys = 1;
+}
+
+message AddUniverseKeysResponsePB {
+  optional MasterErrorPB error = 1;
+}
+
+message GetUniverseKeyRegistryRequestPB {
+}
+
+message GetUniverseKeyRegistryResponsePB {
+  optional MasterErrorPB error = 1;
+  optional UniverseKeysPB universe_keys = 2;
+}
+
+message HasUniverseKeyInMemoryRequestPB {
+  optional string version_id = 1;
+}
+
+message HasUniverseKeyInMemoryResponsePB {
+  optional bool has_key = 1;
+  optional MasterErrorPB error = 2;
+}
+
 
 // The on-disk entry in the sys.catalog table for configuration vinformation
 // that are relevant to the entire cluster. This has a version entry that is
@@ -493,6 +587,11 @@ message SysYSQLCatalogConfigEntryPB {
 
   // If this is set, initdb has failed.
   optional string initdb_error = 5;
+
+  // true if transactional system catalogs have been enabled on this cluster. This means all
+  // YSQL system catalog tables have been made transactional, both in their schema and in the tablet
+  // metadata.
+  optional bool transactional_sys_catalog_enabled = 6;
 }
 
 // Various cluster configuration.
@@ -583,6 +682,12 @@ message TServerMetricsPB {
   optional uint64 num_sst_files = 7;
 }
 
+message TabletForSplitPB {
+  required bytes tablet_id = 1;
+  required bytes split_partition_key = 2;
+  required bytes split_encoded_key = 3;
+}
+
 // Heartbeat sent from the tablet-server to the master
 // to establish liveness and report back any status changes.
 message TSHeartbeatRequestPB {
@@ -613,6 +718,9 @@ message TSHeartbeatRequestPB {
   optional int32 leader_count = 7;
 
   optional int32 cluster_config_version = 8;
+
+  // List of candidate tablets for split based on tablet splitting strategy and settings.
+  repeated TabletForSplitPB tablets_for_split = 9;
 }
 
 message TSHeartbeatResponsePB {
@@ -655,6 +763,8 @@ message TSHeartbeatResponsePB {
   optional cdc.ConsumerRegistryPB consumer_registry = 12;
 
   optional int32 cluster_config_version = 13;
+
+  optional int64 tablet_split_size_threshold_bytes = 14;
 }
 
 message TSInformationPB {
@@ -692,6 +802,9 @@ message TabletLocationsPB {
   optional bytes table_id = 7;
   // Table ids for all the tables on this tablet.
   repeated bytes table_ids = 8;
+
+  // See SysTabletsEntryPB for field with the same name.
+  optional uint64 split_depth = 9;
 }
 
 // Info about a single tablet server, returned to the client as part
@@ -741,7 +854,7 @@ message CreateTableRequestPB {
 
   required string name = 1;
   optional SchemaPB schema = 2;
-  optional int32 num_tablets = 3;
+  optional int32 num_tablets = 3;  // deprecated
   optional PartitionSchemaPB partition_schema = 5;
   optional ReplicationInfoPB replication_info = 6;
   optional TableType table_type = 7 [ default = DEFAULT_TABLE_TYPE ];
@@ -752,6 +865,8 @@ message CreateTableRequestPB {
   optional bytes indexed_table_id = 9; // Indexed table id of this index.
   optional bool is_local_index = 10 [ default = false ];  // Is a local index?
   optional bool is_unique_index = 11 [ default = false ]; // Is a unique index?
+  optional bool skip_index_backfill = 18 [ default = false ]; // Skip online schema migration for
+                                                              // index?
 
   // For RBAC.
   optional string creator_role_name = 12;
@@ -760,6 +875,12 @@ message CreateTableRequestPB {
   optional bytes table_id = 13; // id to assign to this table.
   optional bool is_pg_catalog_table = 14 [ default = false ]; // Is this a sys catalog table?
   optional bool is_pg_shared_table = 15 [ default = false ];  // Is this a shared table?
+
+  // Is this a colocated table? This field is only applicable for a colocated database.
+  optional bool colocated = 17 [ default = true ];
+
+  // This is only applicable for tablegroups. Eventually colocated will be deprecated.
+  optional bytes tablegroup_id = 19;
 }
 
 message CreateTableResponsePB {
@@ -882,6 +1003,9 @@ message GetTableLocationsResponsePB {
 
   repeated TabletLocationsPB tablet_locations = 2;
   optional TableType table_type = 3;
+
+  // See SysTabletsEntryPB for field with the same name.
+  optional uint32 partitions_version = 4;
 }
 
 message AlterTableRequestPB {
@@ -926,6 +1050,11 @@ message AlterTableRequestPB {
   optional NamespaceIdentifierPB new_namespace = 4;
   optional TablePropertiesPB alter_properties = 5;
   optional uint32 wal_retention_secs = 6;
+
+  // If set to true, SendAlterTableRequest will be sent even if no changes are specified in this
+  // request.
+  // This is useful to trigger index permissions update.
+  optional bool force_send_alter_request = 7 [default = false];
 }
 
 message AlterTableResponsePB {
@@ -989,6 +1118,9 @@ message GetTableSchemaResponsePB {
 
   // For index table: information about this index.
   optional IndexInfoPB index_info = 12;
+
+  // True if table is colocated.
+  optional bool colocated = 13;
 }
 
 // ============================================================================
@@ -1007,6 +1139,8 @@ message ListTabletServersResponsePB {
     required NodeInstancePB instance_id = 1;
     optional TSRegistrationPB registration = 2;
     optional int32 millis_since_heartbeat = 3;
+    optional bool alive = 4;
+    optional TServerMetricsPB metrics = 5;
   }
   repeated Entry servers = 2;
 }
@@ -1071,10 +1205,15 @@ message DumpMasterStateRequestPB {
   // If set to true, the leader sends request to all current peers to dump their state too.
   // The on_disk is sent along to peers too.
   optional bool peers_also = 2 [default = false];
+
+  // If set to true, the dump will be returned back as a string in the response.
+  // Else the dump will be saved into the master respective log files.
+  optional bool return_dump_as_string = 3 [default = false];
 }
 
 message DumpMasterStateResponsePB {
   optional MasterErrorPB error = 1;
+  optional string dump = 2;
 }
 
 message ChangeLoadBalancerStateRequestPB {
@@ -1083,6 +1222,14 @@ message ChangeLoadBalancerStateRequestPB {
 
 message ChangeLoadBalancerStateResponsePB {
   optional MasterErrorPB error = 1;
+}
+
+message GetLoadBalancerStateRequestPB {
+}
+
+message GetLoadBalancerStateResponsePB {
+  optional MasterErrorPB error = 1;
+  optional bool is_enabled = 2;
 }
 
 // Update an ex-peer about its removal from the cluster.
@@ -1130,14 +1277,19 @@ message GetLeaderBlacklistPercentRequestPB {
 // When no errors, the percent reflects the progress of load removal from the blacklisted tservers.
 message GetLoadMovePercentResponsePB {
   optional MasterErrorPB error = 1;
+
+  // To be deprecated. Replaced by "100 * (total - remaining) / total".
   optional double percent = 2;
+
+  optional uint64 remaining = 3;
+  optional uint64 total = 4;
 }
 
 // Is load balancer idle.
 message IsLoadBalancerIdleRequestPB {
 }
 
-// When no errors, load balancer is active.
+// When no errors, load balancer is idle.
 message IsLoadBalancerIdleResponsePB {
   optional MasterErrorPB error = 1;
 }
@@ -1172,6 +1324,14 @@ message AreLeadersOnPreferredOnlyResponsePB {
   optional MasterErrorPB error = 1;
 }
 
+message AreTransactionLeadersSpreadRequestPB {
+}
+
+message AreTransactionLeadersSpreadResponsePB {
+  // Any error being set implies transaction leaders are incorrectly respecting preferred zones.
+  optional MasterErrorPB error = 1;
+}
+
 // ============================================================================
 //  Namespace  (default namespace = ANY placement)
 // ============================================================================
@@ -1190,8 +1350,11 @@ message CreateNamespaceRequestPB {
   // For Postgres:
   optional bytes namespace_id = 4; // id to assign to this namespace.
   optional bytes source_namespace_id = 5; // namespace id of the source database to copy from.
-  optional uint32 next_pg_oid = 6; // Next oid to assign. Ingored when source_namespace_id is given
+  optional uint32 next_pg_oid = 6; // Next oid to assign. Ignored when source_namespace_id is given
                                    // and the next_pg_oid from source namespace will be used.
+
+  // True if the namespace is colocated.
+  optional bool colocated = 7 [ default = false ];
 }
 
 message CreateNamespaceResponsePB {
@@ -1199,6 +1362,18 @@ message CreateNamespaceResponsePB {
   optional MasterErrorPB error = 1;
 
   optional bytes id = 2;
+}
+
+message IsCreateNamespaceDoneRequestPB {
+  optional NamespaceIdentifierPB namespace = 1;
+}
+
+message IsCreateNamespaceDoneResponsePB {
+  // The error, if an error occurred with this request.
+  optional MasterErrorPB error = 1;
+
+  // true if the create operation is completed, false otherwise
+  optional bool done = 2;
 }
 
 // Database type is added to metadata entries such that PGSQL clients cannot delete or connect to
@@ -1216,6 +1391,30 @@ message DeleteNamespaceResponsePB {
   optional MasterErrorPB error = 1;
 }
 
+message IsDeleteNamespaceDoneRequestPB {
+  optional NamespaceIdentifierPB namespace = 1;
+}
+
+message IsDeleteNamespaceDoneResponsePB {
+  // The error, if an error occurred with this request.
+  optional MasterErrorPB error = 1;
+
+  // true if the delete operation completed, false otherwise
+  optional bool done = 2;
+}
+
+message AlterNamespaceRequestPB {
+  optional NamespaceIdentifierPB namespace = 1;
+
+  // New name for the namespace in the alter operation.
+  optional string new_name = 2;
+}
+
+message AlterNamespaceResponsePB {
+  // The error, if an error occurred with this request.
+  optional MasterErrorPB error = 1;
+}
+
 message ListNamespacesRequestPB {
   optional YQLDatabase database_type = 1 [ default = YQL_DATABASE_CQL ];
 }
@@ -1225,6 +1424,59 @@ message ListNamespacesResponsePB {
   optional MasterErrorPB error = 1;
 
   repeated NamespaceIdentifierPB namespaces = 2;
+}
+
+message GetNamespaceInfoRequestPB {
+  optional NamespaceIdentifierPB namespace = 1;
+}
+
+message GetNamespaceInfoResponsePB {
+  // The error, if an error occurred with this request.
+  optional MasterErrorPB error = 1;
+
+  optional NamespaceIdentifierPB namespace = 2;
+  optional bool colocated = 3;
+}
+
+// ============================================================================
+//  Tablegroup
+// ============================================================================
+
+message CreateTablegroupRequestPB {
+  required bytes id = 1;
+  required bytes namespace_id = 2;
+  optional string namespace_name = 3;
+}
+
+message CreateTablegroupResponsePB {
+  // The error, if an error occurred with this request.
+  optional MasterErrorPB error = 1;
+
+  optional bytes parent_table_id = 2;
+  optional bytes parent_table_name = 3;
+}
+
+message DeleteTablegroupRequestPB {
+  required bytes id = 1;
+  required bytes namespace_id = 2;
+}
+
+message DeleteTablegroupResponsePB {
+  // The error, if an error occurred with this request.
+  optional MasterErrorPB error = 1;
+
+  optional bytes parent_table_id = 2;
+}
+
+message ListTablegroupsRequestPB {
+  optional bytes namespace_id = 1;
+}
+
+message ListTablegroupsResponsePB {
+  // The error, if an error occurred with this request.
+  optional MasterErrorPB error = 1;
+
+  repeated TablegroupIdentifierPB tablegroups = 2;
 }
 
 // ============================================================================
@@ -1418,7 +1670,7 @@ message UDTypeInfoPB {
 
 message CreateCDCStreamRequestPB {
   optional string table_id = 1;
-  repeated CDCStreamOptionsPB options = 2;
+  repeated CDCStreamOptionsPB options = 3;
 }
 
 // Options for CDC stream. This will include details such as:
@@ -1478,6 +1730,10 @@ message FlushTablesRequestPB {
 
   // Whether we want to compact the tablets instead of flushing them.
   optional bool is_compaction = 2;
+
+  // Whether we want to include index tables in this flush. If there are index tables in the tables
+  // field this field must be set to false, otherwise the request will fail.
+  optional bool add_indexes = 3;
 }
 
 message FlushTablesResponsePB {
@@ -1496,7 +1752,7 @@ message IsFlushTablesDoneResponsePB {
   // true if the flush tables operation is completed, false otherwise.
   optional bool done = 2;
 
-  // true if the flush tables operation is successfull.
+  // true if the flush tables operation is successful.
   optional bool success = 3;
 }
 
@@ -1531,7 +1787,7 @@ message IsInitDbDoneResponsePB {
   // Someone started running initdb, as indicated by the existence of template1.pg_proc.
   optional bool pg_proc_exists = 2;
 
-  // This is true if the master ran initdb and it finished, succesfully or not.
+  // This is true if the master ran initdb and it finished, successfully or not.
   optional bool done = 4;
 
   // If this is set to a non-empty string, initdb has failed.
@@ -1542,6 +1798,9 @@ message SetupUniverseReplicationRequestPB {
   optional string producer_id = 1;
   repeated HostPortPB producer_master_addresses = 2;
   repeated string producer_table_ids = 3;
+
+  // An id generated by the producer when BootstrapProducer rpc is called.
+  repeated string producer_bootstrap_ids = 4;
 }
 
 message SetupUniverseReplicationResponsePB {
@@ -1556,6 +1815,27 @@ message DeleteUniverseReplicationResponsePB {
   optional MasterErrorPB error = 1;
 }
 
+message AlterUniverseReplicationRequestPB {
+  optional string producer_id = 1;
+  // The below options are currently mutually exclusive.  Only 1 operation at a time.
+  repeated HostPortPB producer_master_addresses = 2;
+  repeated string producer_table_ids_to_add = 4;
+  repeated string producer_table_ids_to_remove = 5;
+}
+
+message AlterUniverseReplicationResponsePB {
+  optional MasterErrorPB error = 1;
+}
+
+message SetUniverseReplicationEnabledRequestPB {
+  optional string producer_id = 1;
+  optional bool is_enabled = 2;
+}
+
+message SetUniverseReplicationEnabledResponsePB {
+  optional MasterErrorPB error = 1;
+}
+
 message GetUniverseReplicationRequestPB {
   optional string producer_id = 1;
 }
@@ -1563,6 +1843,14 @@ message GetUniverseReplicationRequestPB {
 message GetUniverseReplicationResponsePB {
   optional MasterErrorPB error = 1;
   optional SysUniverseReplicationEntryPB entry = 2;
+}
+
+message SplitTabletRequestPB {
+  required bytes tablet_id = 1;
+}
+
+message SplitTabletResponsePB {
+  optional MasterErrorPB error = 1;
 }
 
 service MasterService {
@@ -1589,8 +1877,19 @@ service MasterService {
   rpc GetTableSchema(GetTableSchemaRequestPB) returns (GetTableSchemaResponsePB);
 
   rpc CreateNamespace(CreateNamespaceRequestPB) returns (CreateNamespaceResponsePB);
+  rpc IsCreateNamespaceDone(IsCreateNamespaceDoneRequestPB)
+      returns (IsCreateNamespaceDoneResponsePB);
   rpc DeleteNamespace(DeleteNamespaceRequestPB) returns (DeleteNamespaceResponsePB);
+  rpc IsDeleteNamespaceDone(IsDeleteNamespaceDoneRequestPB)
+      returns (IsDeleteNamespaceDoneResponsePB);
+  rpc AlterNamespace(AlterNamespaceRequestPB) returns (AlterNamespaceResponsePB);
   rpc ListNamespaces(ListNamespacesRequestPB) returns (ListNamespacesResponsePB);
+  rpc GetNamespaceInfo(GetNamespaceInfoRequestPB) returns (GetNamespaceInfoResponsePB);
+
+  // For Tablegroup:
+  rpc CreateTablegroup(CreateTablegroupRequestPB) returns (CreateTablegroupResponsePB);
+  rpc DeleteTablegroup(DeleteTablegroupRequestPB) returns (DeleteTablegroupResponsePB);
+  rpc ListTablegroups(ListTablegroupsRequestPB) returns (ListTablegroupsResponsePB);
 
   // For Postgres:
   rpc ReservePgsqlOids(ReservePgsqlOidsRequestPB) returns (ReservePgsqlOidsResponsePB);
@@ -1637,6 +1936,7 @@ service MasterService {
 
   rpc ChangeLoadBalancerState(ChangeLoadBalancerStateRequestPB)
       returns (ChangeLoadBalancerStateResponsePB);
+  rpc GetLoadBalancerState(GetLoadBalancerStateRequestPB) returns (GetLoadBalancerStateResponsePB);
 
   rpc RemovedMasterUpdate(RemovedMasterUpdateRequestPB) returns (RemovedMasterUpdateResponsePB);
 
@@ -1655,6 +1955,8 @@ service MasterService {
       returns (IsLoadBalancerIdleResponsePB);
   rpc AreLeadersOnPreferredOnly(AreLeadersOnPreferredOnlyRequestPB)
       returns (AreLeadersOnPreferredOnlyResponsePB);
+  rpc AreTransactionLeadersSpread(AreTransactionLeadersSpreadRequestPB)
+      returns (AreTransactionLeadersSpreadResponsePB);
 
   rpc FlushTables(FlushTablesRequestPB) returns (FlushTablesResponsePB);
   rpc IsFlushTablesDone(IsFlushTablesDoneRequestPB) returns (IsFlushTablesDoneResponsePB);
@@ -1669,6 +1971,17 @@ service MasterService {
       returns (SetupUniverseReplicationResponsePB);
   rpc DeleteUniverseReplication(DeleteUniverseReplicationRequestPB)
       returns (DeleteUniverseReplicationResponsePB);
+  rpc AlterUniverseReplication(AlterUniverseReplicationRequestPB)
+      returns (AlterUniverseReplicationResponsePB);
+  rpc SetUniverseReplicationEnabled(SetUniverseReplicationEnabledRequestPB)
+      returns (SetUniverseReplicationEnabledResponsePB);
   rpc GetUniverseReplication(GetUniverseReplicationRequestPB)
       returns (GetUniverseReplicationResponsePB);
+  rpc AddUniverseKeys(AddUniverseKeysRequestPB)  returns (AddUniverseKeysResponsePB);
+  rpc GetUniverseKeyRegistry(GetUniverseKeyRegistryRequestPB)
+      returns (GetUniverseKeyRegistryResponsePB);
+  rpc HasUniverseKeyInMemory(HasUniverseKeyInMemoryRequestPB)
+      returns (HasUniverseKeyInMemoryResponsePB);
+
+  rpc SplitTablet(SplitTabletRequestPB) returns (SplitTabletResponsePB);
 }

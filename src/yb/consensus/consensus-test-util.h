@@ -46,6 +46,7 @@
 #include "yb/common/hybrid_time.h"
 #include "yb/common/wire_protocol.h"
 #include "yb/consensus/consensus.h"
+#include "yb/consensus/test_consensus_context.h"
 #include "yb/consensus/consensus_peers.h"
 #include "yb/consensus/consensus_queue.h"
 #include "yb/consensus/log.h"
@@ -54,6 +55,7 @@
 #include "yb/gutil/map-util.h"
 #include "yb/gutil/strings/substitute.h"
 #include "yb/rpc/messenger.h"
+#include "yb/rpc/rpc_test_util.h"
 #include "yb/server/clock.h"
 #include "yb/util/countdown_latch.h"
 #include "yb/util/locks.h"
@@ -67,8 +69,8 @@ using namespace std::literals;
 #define TOKENPASTE2(x, y) TOKENPASTE(x, y)
 
 #define ASSERT_OPID_EQ(left, right) \
-  OpId TOKENPASTE2(_left, __LINE__) = (left); \
-  OpId TOKENPASTE2(_right, __LINE__) = (right); \
+  OpIdPB TOKENPASTE2(_left, __LINE__) = (left); \
+  OpIdPB TOKENPASTE2(_right, __LINE__) = (right); \
   if (!consensus::OpIdEquals(TOKENPASTE2(_left, __LINE__), TOKENPASTE2(_right, __LINE__))) \
     FAIL() << "Expected: " << TOKENPASTE2(_right, __LINE__).ShortDebugString() << "\n" \
            << "Value: " << TOKENPASTE2(_left, __LINE__).ShortDebugString() << "\n"
@@ -91,7 +93,7 @@ inline ReplicateMsgPtr CreateDummyReplicate(int64_t term,
                                             const HybridTime& hybrid_time,
                                             int64_t payload_size) {
   auto msg = std::make_shared<ReplicateMsg>();
-  OpId* id = msg->mutable_id();
+  OpIdPB* id = msg->mutable_id();
   id->set_term(term);
   id->set_index(index);
 
@@ -130,7 +132,7 @@ static inline void AppendReplicateMessagesToQueue(
   }
 }
 
-OpId MakeOpIdForIndex(int index) {
+OpIdPB MakeOpIdForIndex(int index) {
   return MakeOpId(index / kTermDivisor, index);
 }
 
@@ -393,7 +395,7 @@ class NoOpTestPeerProxy : public TestPeerProxy {
     return RegisterCallbackAndRespond(kRequestVote, callback);
   }
 
-  const OpId& last_received() {
+  const OpIdPB& last_received() {
     std::lock_guard<simple_spinlock> lock(lock_);
     return last_received_;
   }
@@ -401,7 +403,7 @@ class NoOpTestPeerProxy : public TestPeerProxy {
  private:
   const consensus::RaftPeerPB peer_pb_;
   ConsensusStatusPB last_status_; // Protected by lock_.
-  OpId last_received_;            // Protected by lock_.
+  OpIdPB last_received_;            // Protected by lock_.
 };
 
 class NoOpTestPeerProxyFactory : public PeerProxyFactory {
@@ -516,6 +518,14 @@ class LocalTestPeerProxy : public TestPeerProxy {
     tserver::TabletServerErrorPB* error = response->mutable_error();
     error->set_code(tserver::TabletServerErrorPB::UNKNOWN_ERROR);
     StatusToPB(status, error->mutable_status());
+    ClearStatus(response);
+  }
+
+  void ClearStatus(VoteResponsePB* response) {
+  }
+
+  void ClearStatus(ConsensusResponsePB* response) {
+    response->clear_status();
   }
 
   template<class Request, class Response>
@@ -614,7 +624,7 @@ class LocalTestPeerProxyFactory : public PeerProxyFactory {
   explicit LocalTestPeerProxyFactory(TestPeerMapManager* peers)
     : peers_(peers) {
     CHECK_OK(ThreadPoolBuilder("test-peer-pool").set_max_threads(3).Build(&pool_));
-    messenger_ = CreateAutoShutdownMessengerHolder(
+    messenger_ = rpc::CreateAutoShutdownMessengerHolder(
         CHECK_RESULT(rpc::MessengerBuilder("test").Build()));
   }
 
@@ -635,7 +645,7 @@ class LocalTestPeerProxyFactory : public PeerProxyFactory {
 
  private:
   gscoped_ptr<ThreadPool> pool_;
-  AutoShutdownMessengerHolder messenger_;
+  rpc::AutoShutdownMessengerHolder messenger_;
   TestPeerMapManager* const peers_;
     // NOTE: There is no need to delete this on the dctor because proxies are externally managed
   vector<LocalTestPeerProxy*> proxies_;
@@ -688,22 +698,18 @@ class TestDriver {
 
 // Fake ReplicaOperationFactory that allows for instantiating and unit
 // testing RaftConsensusState. Does not actually support running transactions.
-class MockOperationFactory : public ReplicaOperationFactory {
+class MockOperationFactory : public TestConsensusContext {
  public:
   CHECKED_STATUS StartReplicaOperation(
       const scoped_refptr<ConsensusRound>& round, HybridTime propagated_hybrid_time) override {
     return StartReplicaOperationMock(round.get());
   }
 
-  void SetPropagatedSafeTime(HybridTime ht) override {}
-
-  bool ShouldApplyWrite() override { return true; }
-
   MOCK_METHOD1(StartReplicaOperationMock, Status(ConsensusRound* round));
 };
 
 // A transaction factory for tests, usually this is implemented by TabletPeer.
-class TestOperationFactory : public ReplicaOperationFactory {
+class TestOperationFactory : public TestConsensusContext {
  public:
   TestOperationFactory() {
     CHECK_OK(ThreadPoolBuilder("test-operation-factory").set_max_threads(1).Build(&pool_));
@@ -720,10 +726,6 @@ class TestOperationFactory : public ReplicaOperationFactory {
                                                      txn, std::placeholders::_1));
     return Status::OK();
   }
-
-  void SetPropagatedSafeTime(HybridTime ht) override {}
-
-  bool ShouldApplyWrite() override { return true; }
 
   void ReplicateAsync(ConsensusRound* round) {
     CHECK_OK(consensus_->TEST_Replicate(round));
@@ -911,26 +913,27 @@ class TestRaftConsensusQueueIface : public PeerMessageQueueObserver {
     return majority_replicated_op_id_.index() >= index;
   }
 
-  OpId majority_replicated_op_id() {
+  OpIdPB majority_replicated_op_id() {
     std::lock_guard<simple_spinlock> lock(lock_);
     return majority_replicated_op_id_;
   }
 
  protected:
-  void UpdateMajorityReplicated(const MajorityReplicatedData& data,
-                                OpId* committed_index) override {
+  void UpdateMajorityReplicated(
+      const MajorityReplicatedData& data, OpIdPB* committed_index) override {
     std::lock_guard<simple_spinlock> lock(lock_);
     majority_replicated_op_id_ = data.op_id;
     committed_index->CopyFrom(data.op_id);
   }
-  virtual void NotifyTermChange(int64_t term) override {}
-  virtual void NotifyFailedFollower(const std::string& uuid,
-                                    int64_t term,
-                                    const std::string& reason) override {}
+  void NotifyTermChange(int64_t term) override {}
+  void NotifyFailedFollower(const std::string& uuid,
+                            int64_t term,
+                            const std::string& reason) override {}
+  void MajorityReplicatedNumSSTFilesChanged(uint64_t) override {}
 
  private:
   mutable simple_spinlock lock_;
-  OpId majority_replicated_op_id_;
+  OpIdPB majority_replicated_op_id_;
 };
 
 }  // namespace consensus

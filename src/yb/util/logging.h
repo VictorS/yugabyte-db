@@ -146,9 +146,8 @@ enum PRIVATE_ThrottleMsg {THROTTLE_MSG};
 
 // The direct user-facing macros.
 #define YB_LOG_EVERY_N(severity, n) \
-  GOOGLE_GLOG_COMPILE_ASSERT(google::GLOG_ ## severity < \
-                             google::NUM_SEVERITIES, \
-                             INVALID_REQUESTED_LOG_SEVERITY); \
+  static_assert(google::GLOG_ ## severity < google::NUM_SEVERITIES, \
+                "Invalid requested log severity"); \
   YB_SOME_KIND_OF_LOG_EVERY_N(severity, (n), google::LogMessage::SendToLog)
 
 #define YB_LOG_WITH_PREFIX_EVERY_N(severity, n) YB_LOG_EVERY_N(severity, n) << LogPrefix()
@@ -292,6 +291,7 @@ std::ostream& operator<<(std::ostream &os, const PRIVATE_ThrottleMsg&);
 // Same as the above, but obtain the lock.
 #define LOG_WITH_PREFIX(severity) LOG(severity) << LogPrefix()
 #define VLOG_WITH_PREFIX(verboselevel) VLOG(verboselevel) << LogPrefix()
+#define VLOG_WITH_FUNC(verboselevel) VLOG(verboselevel) << __func__ << ": "
 #define DVLOG_WITH_PREFIX(verboselevel) DVLOG(verboselevel) << LogPrefix()
 #define LOG_IF_WITH_PREFIX(severity, condition) LOG_IF(severity, condition) << LogPrefix()
 #define VLOG_IF_WITH_PREFIX(verboselevel, condition) VLOG_IF(verboselevel, condition) << LogPrefix()

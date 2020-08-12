@@ -155,8 +155,16 @@ class HybridTime {
     return AddMicroseconds(millis * MonoTime::kMicrosecondsPerMillisecond);
   }
 
+  HybridTime AddDelta(MonoDelta delta) const {
+    return AddMicroseconds(delta.ToMicroseconds());
+  }
+
   // Sets this hybrid time from 'value'
   CHECKED_STATUS FromUint64(uint64_t value);
+
+  static HybridTime FromPB(uint64_t value) {
+    return value ? HybridTime(value) : HybridTime();
+  }
 
   HybridTimeRepr value() const { return v; }
 
@@ -192,6 +200,11 @@ class HybridTime {
   // Returns the physical value embedded in this HybridTime, in microseconds.
   inline MicrosTime GetPhysicalValueMicros() const {
     return v >> kBitsForLogicalComponent;
+  }
+
+  // Returns the physical value embedded in this HybridTime, in milliseconds.
+  inline MillisTime GetPhysicalValueMillis() const {
+    return GetPhysicalValueMicros() / 1000;
   }
 
   inline int64_t PhysicalDiff(const HybridTime& other) const {

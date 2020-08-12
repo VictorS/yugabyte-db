@@ -1,22 +1,27 @@
 // Copyright (c) YugaByte, Inc.
 
 import React, { Component } from 'react';
-import {withRouter} from 'react-router';
-import {isNonEmptyArray} from 'utils/ObjectUtils';
-const PropTypes = require('prop-types');
+import { withRouter } from 'react-router';
+import { isNonEmptyArray } from '../../utils/ObjectUtils';
+import { getPromiseState } from '../../utils/PromiseUtils';
+import { isHidden } from '../../utils/LayoutUtils';
+import PropTypes from 'prop-types';
 
 class AuthenticatedComponent extends Component {
   constructor(props) {
     super(props);
-    this.state = {prevPath: ""};
+    this.state = {
+      prevPath: "",
+      fetchScheduled: false,
+    };
   }
 
   getChildContext() {
     return {prevPath: this.state.prevPath};
   }
 
-  componentWillMount() {
-    this.props.fetchHostInfo();
+
+  componentDidMount() {
     this.props.fetchSoftwareVersions();
     this.props.fetchTableColumnTypes();
     this.props.getEBSListItems();
@@ -39,43 +44,49 @@ class AuthenticatedComponent extends Component {
     task.status === "Initializing") && (Number(task.percentComplete) !== 100))) : false;
   };
 
-  componentWillReceiveProps(nextProps) {
-    const {tasks} = nextProps;
-    if (this.props.fetchMetadata !== nextProps.fetchMetadata && nextProps.fetchMetadata) {
+  componentDidUpdate(prevProps) {
+    const { tasks } = this.props;
+    if (prevProps.fetchMetadata !== this.props.fetchMetadata && this.props.fetchMetadata) {
       this.props.getProviderListItems();
       this.props.fetchUniverseList();
       this.props.getSupportedRegionList();
     }
-    if (this.props.fetchUniverseMetadata !== nextProps.fetchUniverseMetadata && nextProps.fetchUniverseMetadata) {
+    if (prevProps.fetchUniverseMetadata !== this.props.fetchUniverseMetadata && this.props.fetchUniverseMetadata) {
       this.props.fetchUniverseList();
     }
-    if (this.props.location !== nextProps.location) {
-      this.setState({prevPath: this.props.location.pathname});
+    if (prevProps.location !== this.props.location) {
+      this.setState({prevPath: prevProps.location.pathname});
     }
-    // If there is a pending customer task, we start schedule fetch
-    if (this.hasPendingCustomerTasks(tasks.customerTaskList)) {
-      if (typeof (this.timeout) === "undefined") {
-        this.scheduleFetch();
-      }
-    } else if (isNonEmptyArray(tasks.customerTaskList)) {
-      // If there is no pending task, we clear the timer
-      if (typeof (this.timeout) !== "undefined") {
-        clearTimeout(this.timeout);
-        delete(this.timeout);
-      }
+    // Check if there are pending customer tasks and no existing recursive fetch calls
+    if (this.hasPendingCustomerTasks(tasks.customerTaskList) && !this.state.fetchScheduled) {
+      this.scheduleFetch();
     }
   }
 
   scheduleFetch = () => {
     const self = this;
-    this.timeout = setInterval(function(){
-      self.props.fetchCustomerTasks();
-    }, 6000);
+
+    function queryTasks() {
+      const taskList = self.props.tasks.customerTaskList;
+
+      // Check if there are still customer tasks in progress or if list is empty
+      if (!self.hasPendingCustomerTasks(taskList) && isNonEmptyArray(taskList)) {
+        self.setState({fetchScheduled: false});
+      } else {
+        self.props.fetchCustomerTasks().then(() => {
+          setTimeout(queryTasks, 6000);
+        });
+      }
+    }
+    queryTasks();
+    this.setState({fetchScheduled: true});
   };
 
   render() {
+    const { currentCustomer } = this.props;
+    const sidebarHidden = getPromiseState(currentCustomer).isSuccess() && isHidden(currentCustomer.data.features, "menu.sidebar");
     return (
-      <div className="full-height-container">
+      <div className={sidebarHidden ? 'full-height-container sidebar-hidden' : 'full-height-container'}>
         {this.props.children}
       </div>
     );

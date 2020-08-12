@@ -629,6 +629,8 @@ class DB {
     return SetOptions(DefaultColumnFamily(), new_options);
   }
 
+  virtual void SetDisableFlushOnShutdown(bool disable_flush_on_shutdown) {}
+
   // CompactFiles() inputs a list of files specified by file numbers and
   // compacts them to the specified level. Note that the behavior is different
   // from CompactRange() in that CompactFiles() performs the compaction job
@@ -801,6 +803,9 @@ class DB {
   // rocksdb instance.
   virtual uint64_t GetCurrentVersionDataSstFilesSize() { return 0; }
 
+  // Returns number of memtables not flushed in default column family memtable list.
+  virtual int GetCfdImmNumNotFlushed() { return 0; }
+
   // Returns a list of all table files for the current version with their level, start key and end
   // key.
   virtual void GetLiveFilesMetaData(std::vector<LiveFileMetaData>* /*metadata*/) {}
@@ -822,6 +827,8 @@ class DB {
   virtual FlushAbility GetFlushAbility() { return FlushAbility::kHasNewData; }
 
   virtual UserFrontierPtr GetMutableMemTableFrontier(UpdateUserValueType type) { return nullptr; }
+
+  virtual void ListenFilesChanged(std::function<void()> listener) {}
 
   // Obtains the meta data of the specified column family of the DB.
   // STATUS(NotFound, "") will be returned if the current DB does not have
@@ -894,6 +901,9 @@ class DB {
   }
 
   virtual bool NeedsDelay() { return false; }
+
+  // Returns approximate middle key (see Version::GetMiddleKey).
+  virtual yb::Result<std::string> GetMiddleKey() = 0;
 
   // Used in testing to make the old memtable immutable and start writing to a new one.
   virtual void TEST_SwitchMemtable() {}

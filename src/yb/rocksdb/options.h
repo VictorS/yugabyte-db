@@ -51,6 +51,7 @@ class PriorityThreadPool;
 
 namespace rocksdb {
 
+class Arena;
 class BoundaryValuesExtractor;
 class Cache;
 class CompactionFilter;
@@ -70,9 +71,12 @@ class TablePropertiesCollectorFactory;
 class RateLimiter;
 class SliceTransform;
 class Statistics;
+class InternalIterator;
 class InternalKeyComparator;
 class WalFilter;
 class MemoryMonitor;
+
+struct FileMetaData;
 
 typedef std::shared_ptr<const InternalKeyComparator> InternalKeyComparatorPtr;
 
@@ -823,6 +827,8 @@ struct ColumnFamilyOptions {
 };
 
 typedef std::function<yb::Result<bool>(const MemTable&)> MemTableFilter;
+using IteratorReplacer =
+    std::function<InternalIterator*(InternalIterator*, Arena*, const Slice&)>;
 
 struct DBOptions {
   // Some functions that make it easier to optimize RocksDB
@@ -1256,8 +1262,6 @@ struct DBOptions {
   // Default: false
   bool allow_concurrent_memtable_write;
 
-  bool in_memory_erase = false;
-
   // If true, threads synchronizing with the write batch group leader will
   // wait for up to write_thread_max_yield_usec before blocking on a mutex.
   // This can substantially improve throughput for concurrent workloads,
@@ -1342,6 +1346,10 @@ struct DBOptions {
 
   // Specific mem tracker for block based tables created by this RocksDB instance.
   std::shared_ptr<yb::MemTracker> block_based_table_mem_tracker;
+
+  // Adds ability to modify iterator created for SST file.
+  // For instance some additional filtering could be added.
+  std::shared_ptr<IteratorReplacer> iterator_replacer;
 };
 
 // Options to control the behavior of a database (passed to DB::Open)

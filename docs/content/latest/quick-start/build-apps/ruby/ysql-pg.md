@@ -1,7 +1,8 @@
 ---
-title: Build a Ruby application
-linkTitle: Build a Ruby application
-description: Build a Ruby application
+title: Build a Ruby application that uses YSQL
+headerTitle: Build a Ruby application
+linkTitle: Ruby
+description: Build a Ruby application that uses Ruby PostgreSQL driver and YSQL.
 aliases:
   - /develop/client-drivers/ruby/
   - /latest/develop/client-drivers/ruby/
@@ -39,23 +40,23 @@ showAsideToc: true
   </li>
 </ul>
 
-## Install the pg driver gem
+## Install the pg driver
 
-Install the Ruby PostgreSQL driver (pg) using the following command. You can get further details for the driver [here](https://bitbucket.org/ged/ruby-pg/wiki/Home).
+Install the Ruby PostgreSQL driver (`pg`) using the following command. You can get further details for the driver [here](https://bitbucket.org/ged/ruby-pg/wiki/Home).
 
 ```sh
 $ gem install pg -- --with-pg-config=<yugabyte-install-dir>/postgres/bin/pg_config
 ```
 
-## Working example
+## Create the sample Ruby application
 
 ### Prerequisites
 
 This tutorial assumes that you have:
 
-- installed YugabyteDB and created a universe with YSQL enabled. If not, please follow these steps in the [Quick Start guide](../../../quick-start/explore-ysql/).
+- installed YugabyteDB and created a universe with YSQL enabled. If not, please follow these steps in the [Quick Start guide](../../../../quick-start/explore-ysql//).
 
-### Writing the Ruby code
+### Add the sample Ruby application code
 
 Create a file `yb-sql-helloworld.rb` and add the following content to it.
 
@@ -66,7 +67,7 @@ require 'pg'
 
 begin
   # Output a table of current connections to the DB
-  conn = PG.connect(host: '127.0.0.1', port: '5433', dbname: 'postgres', user: 'postgres', password: 'postgres')
+  conn = PG.connect(host: '127.0.0.1', port: '5433', dbname: 'yugabyte', user: 'yugabyte', password: 'yugabyte')
 
   # Create table
   conn.exec ("CREATE TABLE employee (id int PRIMARY KEY, \
@@ -94,9 +95,9 @@ ensure
 end
 ```
 
-### Running the application
+### Run the application
 
-To run the application, type the following:
+To use the application, run the following command:
 
 ```sh
 $ ./yb-sql-helloworld.rb

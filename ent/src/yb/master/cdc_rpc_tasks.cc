@@ -15,22 +15,54 @@
 
 #include "yb/client/client.h"
 #include "yb/gutil/bind.h"
+#include "yb/rpc/messenger.h"
+#include "yb/rpc/secure_stream.h"
+#include "yb/server/secure.h"
+#include "yb/util/path_util.h"
 
-DECLARE_int32(cdc_rpc_timeout_ms);
+DECLARE_int32(cdc_read_rpc_timeout_ms);
+DECLARE_string(certs_dir);
+DECLARE_bool(use_node_to_node_encryption);
+DECLARE_string(certs_for_client_dir);
+DECLARE_string(certs_for_cdc_dir);
 
 namespace yb {
 namespace master {
 
 Result<std::shared_ptr<CDCRpcTasks>> CDCRpcTasks::CreateWithMasterAddrs(
-    const std::string& master_addrs) {
+    const std::string& universe_id, const std::string& master_addrs) {
   auto cdc_rpc_tasks = std::make_shared<CDCRpcTasks>();
+  std::string dir;
+
+  if (FLAGS_use_node_to_node_encryption) {
+    rpc::MessengerBuilder messenger_builder("cdc-rpc-tasks");
+    if (!FLAGS_certs_for_cdc_dir.empty()) {
+      dir = JoinPathSegments(FLAGS_certs_for_cdc_dir, universe_id);
+    }
+    cdc_rpc_tasks->secure_context_ = VERIFY_RESULT(server::SetupSecureContext(
+        dir, "", "", server::SecureContextType::kServerToServer, &messenger_builder));
+    cdc_rpc_tasks->messenger_ = VERIFY_RESULT(messenger_builder.Build());
+  }
+
   cdc_rpc_tasks->yb_client_ = VERIFY_RESULT(
       yb::client::YBClientBuilder()
           .add_master_server_addr(master_addrs)
-          .default_admin_operation_timeout(MonoDelta::FromMilliseconds(FLAGS_cdc_rpc_timeout_ms))
-          .Build());
+          .default_admin_operation_timeout(
+              MonoDelta::FromMilliseconds(FLAGS_cdc_read_rpc_timeout_ms))
+          .Build(cdc_rpc_tasks->messenger_.get()));
 
   return cdc_rpc_tasks;
+}
+
+CDCRpcTasks::~CDCRpcTasks() {
+  if (messenger_) {
+    messenger_->Shutdown();
+  }
+}
+
+Result<client::YBClient*> CDCRpcTasks::UpdateMasters(const std::string& master_addrs) {
+  RETURN_NOT_OK(yb_client_->SetMasterAddresses(master_addrs));
+  return yb_client_.get();
 }
 
 Result<google::protobuf::RepeatedPtrField<TabletLocationsPB>> CDCRpcTasks::GetTableLocations(
@@ -41,9 +73,14 @@ Result<google::protobuf::RepeatedPtrField<TabletLocationsPB>> CDCRpcTasks::GetTa
 }
 
 Result<std::vector<std::pair<TableId, client::YBTableName>>> CDCRpcTasks::ListTables() {
-  std::vector<std::pair<TableId, client::YBTableName>> tables;
-  RETURN_NOT_OK(yb_client_->ListTablesWithIds(&tables));
-  return tables;
+  auto tables = VERIFY_RESULT(yb_client_->ListTables());
+  std::vector<std::pair<TableId, client::YBTableName>> result;
+  result.reserve(tables.size());
+  for (auto& t : tables) {
+    auto table_id = t.table_id();
+    result.emplace_back(std::move(table_id), std::move(t));
+  }
+  return result;
 }
 
 } // namespace master

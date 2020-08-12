@@ -171,6 +171,9 @@ class DBImpl : public DB {
       ColumnFamilyHandle* column_family,
       const std::unordered_map<std::string, std::string>& options_map) override;
 
+  // Set whether DB should be flushed on shutdown.
+  void SetDisableFlushOnShutdown(bool disable_flush_on_shutdown) override;
+
   using DB::NumberLevels;
   virtual int NumberLevels(ColumnFamilyHandle* column_family) override;
   using DB::MaxMemCompactionLevel;
@@ -471,6 +474,8 @@ class DBImpl : public DB {
   bool AreWritesStopped();
   bool NeedsDelay() override;
 
+  Result<std::string> GetMiddleKey() override;
+
   // Used in testing to make the old memtable immutable and start writing to a new one.
   void TEST_SwitchMemtable() override;
 
@@ -621,6 +626,7 @@ class DBImpl : public DB {
       std::unique_ptr<Compaction> compaction = nullptr);
   Result<FileNumbersHolder> BackgroundFlush(
       bool* made_progress, JobContext* job_context, LogBuffer* log_buffer, ColumnFamilyData* cfd);
+  void BackgroundJobComplete(const Status& s, JobContext* job_context, LogBuffer* log_buffer);
 
   uint64_t GetCurrentVersionSstFilesSize() override;
 
@@ -629,6 +635,8 @@ class DBImpl : public DB {
   uint64_t GetCurrentVersionDataSstFilesSize() override;
 
   uint64_t GetCurrentVersionNumSSTFiles() override;
+
+  int GetCfdImmNumNotFlushed() override;
 
   // Updates stats_ object with SST files size metrics.
   void SetSSTFileTickers();
@@ -672,6 +680,14 @@ class DBImpl : public DB {
   // I.e. scheduled but not complete compaction or flush.
   // prefix is used for logging.
   bool CheckBackgroundWorkAndLog(const char* prefix) const;
+
+  void ListenFilesChanged(std::function<void()> listener) override;
+
+  std::function<void()> GetFilesChangedListener() const;
+
+  bool HasFilesChangedListener() const;
+
+  void FilesChanged();
 
   struct TaskPriorityChange {
     size_t task_serial_no;
@@ -803,6 +819,10 @@ class DBImpl : public DB {
   WriteBuffer write_buffer_;
 
   WriteThread write_thread_;
+
+#ifndef NDEBUG
+  std::atomic<int> write_waiters_{0};
+#endif
 
   WriteBatch tmp_batch_;
 
@@ -966,9 +986,16 @@ class DBImpl : public DB {
   // Returns flush tick of the last flush of this DB.
   int64_t last_flush_at_tick_ = 0;
 
+  // Whether DB should be flushed on shutdown.
+  bool disable_flush_on_shutdown_ = false;
+
+  mutable std::mutex files_changed_listener_mutex_;
+
+  std::function<void()> files_changed_listener_ GUARDED_BY(files_changed_listener_mutex_);
+
   // No copying allowed
-  DBImpl(const DBImpl&);
-  void operator=(const DBImpl&);
+  DBImpl(const DBImpl&) = delete;
+  void operator=(const DBImpl&) = delete;
 
   // Background threads call this function, which is just a wrapper around
   // the InstallSuperVersion() function. Background threads carry

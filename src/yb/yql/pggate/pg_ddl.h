@@ -48,7 +48,8 @@ class PgCreateDatabase : public PgDdl {
                    const char *database_name,
                    PgOid database_oid,
                    PgOid source_database_oid,
-                   PgOid next_oid);
+                   PgOid next_oid,
+                   const bool colocated);
   virtual ~PgCreateDatabase();
 
   StmtOp stmt_op() const override { return StmtOp::STMT_CREATE_DATABASE; }
@@ -61,6 +62,7 @@ class PgCreateDatabase : public PgDdl {
   const PgOid database_oid_;
   const PgOid source_database_oid_;
   const PgOid next_oid_;
+  bool colocated_ = false;
 };
 
 class PgDropDatabase : public PgDdl {
@@ -86,6 +88,88 @@ class PgDropDatabase : public PgDdl {
   const PgOid database_oid_;
 };
 
+class PgAlterDatabase : public PgDdl {
+ public:
+  // Public types.
+  typedef scoped_refptr<PgDropDatabase> ScopedRefPtr;
+  typedef scoped_refptr<const PgDropDatabase> ScopedRefPtrConst;
+
+  typedef std::unique_ptr<PgDropDatabase> UniPtr;
+  typedef std::unique_ptr<const PgDropDatabase> UniPtrConst;
+
+  // Constructors.
+  PgAlterDatabase(PgSession::ScopedRefPtr pg_session,
+                  const char *database_name,
+                  PgOid database_oid);
+  virtual ~PgAlterDatabase();
+
+  StmtOp stmt_op() const override { return StmtOp::STMT_ALTER_DATABASE; }
+
+  CHECKED_STATUS RenameDatabase(const char *newname);
+
+  // Execute.
+  CHECKED_STATUS Exec();
+
+ private:
+  client::YBNamespaceAlterer* namespace_alterer_;
+};
+
+//--------------------------------------------------------------------------------------------------
+// CREATE / DROP TABLEGROUP
+//--------------------------------------------------------------------------------------------------
+
+class PgCreateTablegroup : public PgDdl {
+ public:
+  // Public types.
+  typedef scoped_refptr<PgCreateTablegroup> ScopedRefPtr;
+  typedef scoped_refptr<const PgCreateTablegroup> ScopedRefPtrConst;
+
+  typedef std::unique_ptr<PgCreateTablegroup> UniPtr;
+  typedef std::unique_ptr<const PgCreateTablegroup> UniPtrConst;
+
+  // Constructors.
+  PgCreateTablegroup(PgSession::ScopedRefPtr pg_session,
+                     const char *database_name,
+                     const PgOid database_oid,
+                     const PgOid tablegroup_oid);
+  virtual ~PgCreateTablegroup();
+
+  StmtOp stmt_op() const override { return StmtOp::STMT_CREATE_TABLEGROUP; }
+
+  // Execute.
+  CHECKED_STATUS Exec();
+
+ private:
+  const char *database_name_;
+  const PgOid database_oid_;
+  const PgOid tablegroup_oid_;
+};
+
+class PgDropTablegroup : public PgDdl {
+ public:
+  // Public types.
+  typedef scoped_refptr<PgDropTablegroup> ScopedRefPtr;
+  typedef scoped_refptr<const PgDropTablegroup> ScopedRefPtrConst;
+
+  typedef std::unique_ptr<PgDropTablegroup> UniPtr;
+  typedef std::unique_ptr<const PgDropTablegroup> UniPtrConst;
+
+  // Constructors.
+  PgDropTablegroup(PgSession::ScopedRefPtr pg_session,
+                   PgOid database_oid,
+                   PgOid tablegroup_oid);
+  virtual ~PgDropTablegroup();
+
+  StmtOp stmt_op() const override { return StmtOp::STMT_DROP_TABLEGROUP; }
+
+  // Execute.
+  CHECKED_STATUS Exec();
+
+ private:
+  const PgOid database_oid_;
+  const PgOid tablegroup_oid_;
+};
+
 //--------------------------------------------------------------------------------------------------
 // CREATE TABLE
 //--------------------------------------------------------------------------------------------------
@@ -107,14 +191,16 @@ class PgCreateTable : public PgDdl {
                 const PgObjectId& table_id,
                 bool is_shared_table,
                 bool if_not_exist,
-                bool add_primary_key);
-  virtual ~PgCreateTable();
+                bool add_primary_key,
+                const bool colocated,
+                const PgObjectId& tablegroup_oid);
 
   StmtOp stmt_op() const override { return StmtOp::STMT_CREATE_TABLE; }
 
   // For PgCreateIndex: the indexed (base) table id and if this is a unique index.
   virtual boost::optional<const PgObjectId&> indexed_table_id() const { return boost::none; }
   virtual bool is_unique_index() const { return false; }
+  virtual const bool skip_index_backfill() const { return false; }
 
   CHECKED_STATUS AddColumn(const char *attr_name,
                            int attr_num,
@@ -137,7 +223,9 @@ class PgCreateTable : public PgDdl {
   }
 
   // Specify the number of tablets explicitly.
-  virtual CHECKED_STATUS SetNumTablets(int32_t num_tablets);
+  CHECKED_STATUS SetNumTablets(int32_t num_tablets);
+
+  CHECKED_STATUS AddSplitRow(int num_cols, YBCPgTypeEntity **types, uint64_t *data);
 
   // Execute.
   virtual CHECKED_STATUS Exec();
@@ -151,15 +239,22 @@ class PgCreateTable : public PgDdl {
                                        ColumnSchema::SortingType sorting_type =
                                            ColumnSchema::SortingType::kNotSpecified);
 
+  virtual size_t PrimaryKeyRangeColumnCount() const;
+
  private:
+  Result<std::vector<std::string>> BuildSplitRows(const client::YBSchema& schema);
+
   client::YBTableName table_name_;
   const PgObjectId table_id_;
   int32_t num_tablets_;
   bool is_pg_catalog_table_;
   bool is_shared_table_;
   bool if_not_exist_;
+  bool colocated_ = true;
+  const PgObjectId tablegroup_oid_;
   boost::optional<YBHashSchema> hash_schema_;
   std::vector<std::string> range_columns_;
+  std::vector<std::vector<QLValuePB>> split_rows_; // Split rows for range tables
   client::YBSchemaBuilder schema_builder_;
 };
 
@@ -230,8 +325,9 @@ class PgCreateIndex : public PgCreateTable {
                 const PgObjectId& base_table_id,
                 bool is_shared_index,
                 bool is_unique_index,
-                bool if_not_exist);
-  virtual ~PgCreateIndex();
+                const bool skip_index_backfill,
+                bool if_not_exist,
+                const PgObjectId& tablegroup_oid);
 
   StmtOp stmt_op() const override { return StmtOp::STMT_CREATE_INDEX; }
 
@@ -241,6 +337,10 @@ class PgCreateIndex : public PgCreateTable {
 
   bool is_unique_index() const override {
     return is_unique_index_;
+  }
+
+  const bool skip_index_backfill() const override {
+    return skip_index_backfill_;
   }
 
   // Execute.
@@ -255,11 +355,15 @@ class PgCreateIndex : public PgCreateTable {
                                ColumnSchema::SortingType sorting_type) override;
 
  private:
+  size_t PrimaryKeyRangeColumnCount() const override;
+
   CHECKED_STATUS AddYBbasectidColumn();
 
   const PgObjectId base_table_id_;
   bool is_unique_index_ = false;
+  bool skip_index_backfill_ = false;
   bool ybbasectid_added_ = false;
+  size_t primary_key_range_column_count_ = 0;
 };
 
 class PgDropIndex : public PgDropTable {
@@ -317,7 +421,7 @@ class PgAlterTable : public PgDdl {
  private:
   const client::YBTableName table_name_;
   const PgObjectId table_id_;
-  client::YBTableAlterer* table_alterer;
+  std::unique_ptr<client::YBTableAlterer> table_alterer;
 
 };
 

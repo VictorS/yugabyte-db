@@ -30,8 +30,8 @@
 #include <iostream>
 #include <string>
 
+#include "yb/common/common.pb.h"
 #include "yb/common/ql_protocol.pb.h"
-#include "yb/common/ql_value.h"
 #include "yb/common/jsonb.h"
 
 #include "yb/util/status.h"
@@ -42,18 +42,19 @@
 #include "yb/util/string_util.h"
 
 namespace yb {
+
+bool operator ==(const QLValuePB& lhs, const QLValuePB& rhs);
+
 namespace bfql {
 
 //--------------------------------------------------------------------------------------------------
 // Dummy function for minimum opcode.
-template<typename PTypePtr, typename RTypePtr>
-CHECKED_STATUS NoOp() {
+inline CHECKED_STATUS NoOp() {
   return Status::OK();
 }
 
 // ServerOperator that takes no argument and has no return value.
-template<typename PTypePtr, typename RTypePtr>
-CHECKED_STATUS ServerOperator() {
+inline CHECKED_STATUS ServerOperator() {
   LOG(ERROR) << "Only tablet servers can execute this builtin call";
   return STATUS(RuntimeError, "Only tablet servers can execute this builtin call");
 }
@@ -108,7 +109,7 @@ CHECKED_STATUS ToJson(PTypePtr col, RTypePtr result) {
   if (!s.ok()) {
     return s.CloneAndPrepend(strings::Substitute(
         "Cannot convert $0 value $1 to $2",
-        QLType::ToCQLString(QLValue::FromInternalDataType(col->type())),
+        QLType::ToCQLString(InternalToDataType(col->type())),
         col->ToString(),
         QLType::ToCQLString(DataType::JSONB)));
   }
@@ -283,25 +284,25 @@ CHECKED_STATUS SubListList(PTypePtr x, PTypePtr y, RTypePtr result) {
 
 //--------------------------------------------------------------------------------------------------
 // Now().
-template<typename PTypePtr, typename RTypePtr>
+template<typename RTypePtr>
 CHECKED_STATUS NowDate(RTypePtr result) {
   result->set_date_value(DateTime::DateNow());
   return Status::OK();
 }
 
-template<typename PTypePtr, typename RTypePtr>
+template<typename RTypePtr>
 CHECKED_STATUS NowTime(RTypePtr result) {
   result->set_time_value(DateTime::TimeNow());
   return Status::OK();
 }
 
-template<typename PTypePtr, typename RTypePtr>
+template<typename RTypePtr>
 CHECKED_STATUS NowTimestamp(RTypePtr result) {
   result->set_timestamp_value(DateTime::TimestampNow());
   return Status::OK();
 }
 
-template<typename PTypePtr, typename RTypePtr>
+template<typename RTypePtr>
 CHECKED_STATUS NowTimeUuid(RTypePtr result) {
   uuid_t linux_time_uuid;
   uuid_generate_time(linux_time_uuid);
@@ -315,7 +316,7 @@ CHECKED_STATUS NowTimeUuid(RTypePtr result) {
 //--------------------------------------------------------------------------------------------------
 // uuid().
 static const uint16_t kUUIDType = 4;
-template<typename PTypePtr, typename RTypePtr>
+template<typename RTypePtr>
 CHECKED_STATUS GetUuid(RTypePtr result) {
   boost::uuids::uuid b_uuid = Uuid::Generate();
   Uuid uuid(b_uuid);

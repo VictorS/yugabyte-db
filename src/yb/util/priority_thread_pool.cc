@@ -24,7 +24,6 @@
 #include <boost/multi_index/mem_fun.hpp>
 #include <boost/multi_index/ordered_index.hpp>
 #include <boost/multi_index/ranked_index.hpp>
-#include <boost/thread/reverse_lock.hpp>
 
 #include "yb/gutil/thread_annotations.h"
 
@@ -365,6 +364,7 @@ class PriorityThreadPool::Impl : public PriorityThreadPoolWorkerContext {
           ++it;
         }
       }
+      UpdateMaxPriorityToDefer();
     }
     AbortTasks(abort_tasks, kRemoveTaskStatus);
   }
@@ -394,6 +394,7 @@ class PriorityThreadPool::Impl : public PriorityThreadPoolWorkerContext {
       for (auto& worker : workers_) {
         workers.push_back(&worker);
       }
+      UpdateMaxPriorityToDefer();
     }
     for (auto* worker : workers) {
       worker->Stop();

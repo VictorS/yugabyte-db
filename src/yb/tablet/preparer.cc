@@ -21,6 +21,7 @@
 #include <gflags/gflags.h>
 
 #include "yb/consensus/consensus.h"
+#include "yb/gutil/macros.h"
 #include "yb/tablet/preparer.h"
 #include "yb/tablet/operations/operation_driver.h"
 #include "yb/util/logging.h"
@@ -30,6 +31,7 @@
 DEFINE_int32(max_group_replicate_batch_size, 16,
              "Maximum number of operations to submit to consensus for replication in a batch.");
 
+using namespace std::literals;
 using std::vector;
 
 namespace yb {
@@ -103,8 +105,7 @@ class PreparerImpl {
                          OperationDrivers::iterator end);
 };
 
-PreparerImpl::PreparerImpl(consensus::Consensus* consensus,
-                                     ThreadPool* tablet_prepare_pool)
+PreparerImpl::PreparerImpl(consensus::Consensus* consensus, ThreadPool* tablet_prepare_pool)
     : consensus_(consensus),
       tablet_prepare_pool_token_(tablet_prepare_pool
                                      ->NewToken(ThreadPool::ExecutionMode::SERIAL)) {
@@ -138,8 +139,19 @@ Status PreparerImpl::Submit(OperationDriver* operation_driver) {
     return STATUS(IllegalState, "Tablet is shutting down");
   }
 
-  active_tasks_.fetch_add(1, std::memory_order_release);
-  queue_.Push(operation_driver);
+  if (!operation_driver->is_leader_side()) {
+    while (active_tasks_.load(std::memory_order_acquire) != 0) {
+      YB_LOG_EVERY_N_SECS(WARNING, 1)
+          << "Waiting for active tasks to become zero: "
+          << active_tasks_.load(std::memory_order_acquire);
+      // It should be very rare case, so could do busy wait.
+      std::this_thread::sleep_for(1ms);
+    }
+    operation_driver->PrepareAndStartTask();
+  } else {
+    active_tasks_.fetch_add(1, std::memory_order_release);
+    queue_.Push(operation_driver);
+  }
 
   auto expected = false;
   if (!running_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
@@ -181,35 +193,55 @@ void PreparerImpl::Run() {
   }
 }
 
+namespace {
+
+bool ShouldApplySeparately(OperationType operation_type) {
+  switch (operation_type) {
+    // For certain operations types we have to apply them in a batch of their own.
+    // E.g. ChangeMetadataOperation::Prepare calls Tablet::CreatePreparedChangeMetadata, which
+    // acquires the schema lock. Because of this, we must not attempt to process two
+    // ChangeMetadataOperations in one batch, otherwise we'll deadlock.
+    //
+    // Also, for infrequently occuring operations batching has little performance benefit in
+    // general.
+    case OperationType::kChangeMetadata: FALLTHROUGH_INTENDED;
+    case OperationType::kSnapshot: FALLTHROUGH_INTENDED;
+    case OperationType::kTruncate: FALLTHROUGH_INTENDED;
+    case OperationType::kSplit: FALLTHROUGH_INTENDED;
+    case OperationType::kEmpty: FALLTHROUGH_INTENDED;
+    case OperationType::kHistoryCutoff:
+      return true;
+
+    case OperationType::kWrite: FALLTHROUGH_INTENDED;
+    case OperationType::kUpdateTransaction:
+      return false;
+  }
+  FATAL_INVALID_ENUM_VALUE(OperationType, operation_type);
+}
+
+}  // anonymous namespace
+
 void PreparerImpl::ProcessItem(OperationDriver* item) {
   CHECK_NOTNULL(item);
 
-  if (item->is_leader_side()) {
-    // ChangeMetadataOperation::Prepare calls Tablet::CreatePreparedChangeMetadata, which acquires
-    // the schema lock. Because of this, we must not attempt to process two ChangeMetadataOperations
-    // in one batch, otherwise we'll deadlock.
-    auto operation_type = item->operation_type();
-    const bool apply_separately = operation_type == OperationType::kChangeMetadata ||
-                                  operation_type == OperationType::kEmpty;
-    const int64_t bound_term = apply_separately ? -1 : item->consensus_round()->bound_term();
+  LOG_IF(DFATAL, !item->is_leader_side()) << "Processing follower-side item";
 
-    // Don't add more than the max number of operations to a batch, and also don't add
-    // operations bound to different terms, so as not to fail unrelated operations
-    // unnecessarily in case of a bound term mismatch.
-    if (leader_side_batch_.size() >= FLAGS_max_group_replicate_batch_size ||
-        (!leader_side_batch_.empty() &&
-            bound_term != leader_side_batch_.back()->consensus_round()->bound_term())) {
-      ProcessAndClearLeaderSideBatch();
-    }
-    leader_side_batch_.push_back(item);
-    if (apply_separately) {
-      ProcessAndClearLeaderSideBatch();
-    }
-  } else {
-    // We found a non-leader-side operation. We need to process the accumulated batch of
-    // leader-side operations first, and then process this other operation.
+  auto operation_type = item->operation_type();
+
+  const bool apply_separately = ShouldApplySeparately(operation_type);
+  const int64_t bound_term = apply_separately ? -1 : item->consensus_round()->bound_term();
+
+  // Don't add more than the max number of operations to a batch, and also don't add
+  // operations bound to different terms, so as not to fail unrelated operations
+  // unnecessarily in case of a bound term mismatch.
+  if (leader_side_batch_.size() >= FLAGS_max_group_replicate_batch_size ||
+      (!leader_side_batch_.empty() &&
+          bound_term != leader_side_batch_.back()->consensus_round()->bound_term())) {
     ProcessAndClearLeaderSideBatch();
-    item->PrepareAndStartTask();
+  }
+  leader_side_batch_.push_back(item);
+  if (apply_separately) {
+    ProcessAndClearLeaderSideBatch();
   }
 }
 
@@ -279,7 +311,7 @@ void PreparerImpl::ReplicateSubBatch(
   rounds_to_replicate_.clear();
 
   if (PREDICT_FALSE(!s.ok())) {
-    VLOG(2) << "ReplicateBatch failed with status " << s.ToString()
+    VLOG(1) << "ReplicateBatch failed with status " << s.ToString()
             << ", treating all " << std::distance(batch_begin, batch_end) << " operations as "
             << "failed with that status";
     // Treat all the operations in the batch as failed.

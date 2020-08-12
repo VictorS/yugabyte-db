@@ -39,6 +39,7 @@
 #include "yb/master/scoped_leader_shared_lock.h"
 #include "yb/master/ts_descriptor.h"
 #include "yb/master/cluster_balance.h"
+#include "yb/master/encryption_manager.h"
 #include "yb/util/flag_tags.h"
 
 using std::shared_ptr;
@@ -47,6 +48,10 @@ DEFINE_int32(catalog_manager_bg_task_wait_ms, 1000,
              "Amount of time the catalog manager background task thread waits "
              "between runs");
 TAG_FLAG(catalog_manager_bg_task_wait_ms, hidden);
+
+DEFINE_int32(load_balancer_initial_delay_secs, 120,
+             "Amount of time to wait between becoming master leader and enabling the load "
+             "balancer.");
 
 namespace yb {
 namespace master {
@@ -138,13 +143,24 @@ void CatalogManagerBgTasks::Run() {
                      << s.ToString();
         }
       } else {
-        catalog_manager_->load_balance_policy_->RunLoadBalancer();
+        if (catalog_manager_->TimeSinceElectedLeader() >
+            MonoDelta::FromSeconds(FLAGS_load_balancer_initial_delay_secs)) {
+          catalog_manager_->load_balance_policy_->RunLoadBalancer();
+        }
       }
 
-      if (!to_delete.empty()) {
+      if (!to_delete.empty() || catalog_manager_->AreTablesDeleting()) {
         catalog_manager_->CleanUpDeletedTables();
       }
+      std::vector<scoped_refptr<CDCStreamInfo>> streams;
+      auto s = catalog_manager_->FindCDCStreamsMarkedAsDeleting(&streams);
+      if (s.ok() && !streams.empty()) {
+        s = catalog_manager_->CleanUpDeletedCDCStreams(streams);
+      }
     }
+    WARN_NOT_OK(catalog_manager_->encryption_manager_->
+                GetUniverseKeyRegistry(&catalog_manager_->master_->proxy_cache()),
+                "Could not schedule GetUniverseKeyRegistry task.");
     // Wait for a notification or a timeout expiration.
     //  - CreateTable will call Wake() to notify about the tablets to add
     //  - HandleReportedTablet/ProcessPendingAssignments will call WakeIfHasPendingUpdates()

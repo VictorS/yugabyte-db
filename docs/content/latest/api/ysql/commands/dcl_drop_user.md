@@ -1,8 +1,8 @@
 ---
-title: DROP USER
+title: DROP USER statement [YSQL]
+headerTitle: DROP USER
 linkTitle: DROP USER
-description: Users and roles
-summary: DROP USER
+description: Use the DROP USER statement to drop a user or role. DROP USER is an alias for DROP ROLE.
 menu:
   latest:
     identifier: api-ysql-commands-drop-user
@@ -15,7 +15,7 @@ showAsideToc: true
 
 ## Synopsis
 
-`DROP USER` is an alias for [`DROP ROLE`](../dcl_drop_role) and is used to drop a role.
+Use the `DROP USER` statement to drop a user or role. `DROP USER` is an alias for [`DROP ROLE`](../dcl_drop_role) and is used to drop a role.
 
 ## Syntax
 
@@ -57,8 +57,7 @@ yugabyte=# DROP USER John;
 
 ## See also
 
-[`CREATE ROLE`](../dcl_create_role)
-[`ALTER ROLE`](../dcl_alter_role)
-[`GRANT`](../dcl_grant)
-[`REVOKE`](../dcl_revoke)
-[Other YSQL Statements](..)
+- [`CREATE ROLE`](../dcl_create_role)
+- [`ALTER ROLE`](../dcl_alter_role)
+- [`GRANT`](../dcl_grant)
+- [`REVOKE`](../dcl_revoke)

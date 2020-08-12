@@ -3,6 +3,7 @@
 import Cookies from 'js-cookie';
 import React from 'react';
 import { Route, IndexRoute, browserHistory } from 'react-router';
+import _ from 'lodash';
 
 import { validateToken, validateFromTokenResponse,
   fetchCustomerCount, customerTokenError,
@@ -27,30 +28,38 @@ import YugawareLogs from './pages/YugawareLogs';
 import Importer from './pages/Importer';
 import Certificates from './pages/Certificates';
 import Releases from './pages/Releases';
+import { isDefinedNotNull } from './utils/ObjectUtils';
+import { CreateUniverse } from './redesign/universes/CreateUniverse';
+import { EditUniverse } from './redesign/universes/EditUniverse';
 
-const clearCredentials = () => {
-  // Don't clear all of localStorage so we can keep the introduction item
-  localStorage.removeItem('apiToken');
+export const clearCredentials = () => {
   localStorage.removeItem('authToken');
+  localStorage.removeItem('apiToken');
+  localStorage.removeItem('customerId');
+  localStorage.removeItem('userId');
   Cookies.remove('apiToken');
   Cookies.remove('authToken');
   Cookies.remove('customerId');
+  Cookies.remove('userId');
   browserHistory.push('/');
 };
 
 function validateSession(store, replacePath, callback) {
-  const authToken = Cookies.get("authToken") || localStorage.getItem('authToken');
-  const apiToken = Cookies.get("apiToken") || localStorage.getItem('apiToken');
-  const cUUID = Cookies.get("customerId") || localStorage.getItem("customerId");
   // Attempt to route to dashboard if tokens and cUUID exists or if insecure mode is on.
   // Otherwise, go to login/register.
-  if((!cUUID || cUUID === '') ||
-      ((!apiToken || apiToken === '') && (!authToken || authToken === ''))) {
+  const userId = Cookies.get('userId') || localStorage.getItem('userId');
+  const customerId = Cookies.get('customerId') || localStorage.getItem('customerId');
+  if (_.isEmpty(customerId) || _.isEmpty(userId)) {
     store.dispatch(insecureLogin()).then((response) => {
       if (response.payload.status === 200) {
         store.dispatch(insecureLoginResponse(response));
         localStorage.setItem('apiToken', response.payload.data.apiToken);
         localStorage.setItem('customerId', response.payload.data.customerUUID);
+        localStorage.setItem('userId', response.payload.data.userUUID);
+        // Show the intro modal if OSS version
+        if (localStorage.getItem('__yb_new_user__') == null) {
+          localStorage.setItem('__yb_new_user__', true);
+        }
         browserHistory.push('/');
       }
     });
@@ -68,7 +77,7 @@ function validateSession(store, replacePath, callback) {
     store.dispatch(validateToken())
       .then((response) => {
         if (response.error) {
-          const { status } = response.payload.response;
+          const { status } = isDefinedNotNull(response.payload.response) ? response.payload.response : {};
           switch (status) {
             case 403:
               store.dispatch(resetCustomer());
@@ -82,16 +91,23 @@ function validateSession(store, replacePath, callback) {
         }
 
         store.dispatch(validateFromTokenResponse(response.payload));
-        if (response.payload.status !== 200) {
+        if (response.payload.status === 200) {
+          // update userId and customerId in local storage on successful token validation
+          if ("uuid" in response.payload.data) {
+            localStorage.setItem("customerId", response.payload.data["uuid"]);
+          }
+          localStorage.setItem('userId', userId);
+        } else {
           store.dispatch(resetCustomer());
           clearCredentials();
           callback();
-        } else if ("uuid" in response.payload.data) {
-          localStorage.setItem("customerId", response.payload.data["uuid"]);
         }
-      })
-      .finally(callback);
+      });
   }
+  // TODO: Customer configs are sometimes not updated because callback does not wait for tokens
+  // to be validated. However, having callback wait for the response will cause an infinite loop
+  // when redirecting (e.g. showOrRedirect).
+  callback();
 }
 
 export default (store) => {
@@ -122,6 +138,12 @@ export default (store) => {
           <Route path="/universes/:uuid/:tab" component={UniverseDetail} />
           <Route path="/universes/:uuid/tables/:tableUUID" component={TableDetail}/>
         </Route>
+
+        <Route path="/new/universes">
+          <Route path="/new/universes/create" component={CreateUniverse} />
+          <Route path="/new/universes/:uuid/edit" component={EditUniverse} />
+        </Route>
+
         <Route path="/tasks" component={Tasks} >
           <IndexRoute component={TasksList}/>
           <Route path="/tasks/:taskUUID" component={TaskDetail}/>
@@ -135,6 +157,7 @@ export default (store) => {
         <Route path="/alerts" component={Alerts}/>
         <Route path="/help" component={Help}/>
         <Route path="/profile" component={Profile}/>
+        <Route path="/profile/:tab" component={Profile}/>
         <Route path="/logs" component={YugawareLogs}/>
         <Route path="/releases" component={Releases}/>
         <Route path="/certificates" component={Certificates}/>

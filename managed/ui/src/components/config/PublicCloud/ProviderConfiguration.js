@@ -1,8 +1,8 @@
 // Copyright (c) YugaByte, Inc.
 
 import React, { Component } from 'react';
-import { getPromiseState } from 'utils/PromiseUtils';
-import { isNonEmptyObject, isDefinedNotNull, isNonEmptyArray, isNonEmptyString } from 'utils/ObjectUtils';
+import { getPromiseState } from '../../../utils/PromiseUtils';
+import { isNonEmptyObject, isDefinedNotNull, isNonEmptyArray, isNonEmptyString } from '../../../utils/ObjectUtils';
 import { withRouter } from 'react-router';
 import _ from 'lodash';
 import ProviderResultView from './views/ProviderResultView';
@@ -21,10 +21,6 @@ class ProviderConfiguration extends Component {
     };
   }
 
-  componentWillMount() {
-    this.props.fetchCustomerTasksList();
-  }
-
   getInitView = () => {
     const {providerType} = this.props;
     if (providerType === "gcp") {
@@ -35,8 +31,19 @@ class ProviderConfiguration extends Component {
   };
 
   componentDidMount() {
-    const {configuredProviders, tasks: {customerTaskList}, providerType, getCurrentTaskData} = this.props;
+    const {
+      configuredProviders,
+      tasks: {customerTaskList},
+      providerType,
+      getCurrentTaskData,
+      fetchHostInfo,
+      fetchCustomerTasksList
+    } = this.props;
     const currentProvider = configuredProviders.data.find((provider) => provider.code === providerType);
+
+    fetchHostInfo();
+    fetchCustomerTasksList();
+
     if (getPromiseState(configuredProviders).isLoading() || getPromiseState(configuredProviders).isInit()) {
       this.setState({currentView: 'loading'});
     } else {
@@ -52,10 +59,15 @@ class ProviderConfiguration extends Component {
     }
   }
 
-  componentWillReceiveProps(nextProps) {
-    const {configuredProviders, cloud: {bootstrapProvider},
-            cloudBootstrap: {data: { type }, promiseState},
-            tasks: {customerTaskList}, providerType} = nextProps;
+  componentDidUpdate(prevProps) {
+    const {
+      configuredProviders,
+      cloud: { bootstrapProvider },
+      cloudBootstrap,
+      cloudBootstrap: { data: { type }, promiseState },
+      tasks: { customerTaskList },
+      providerType
+    } = this.props;
     const { refreshing } = this.state;
     if (refreshing && type === "initialize" && !promiseState.isLoading()) {
       this.setState({refreshing: false});
@@ -65,15 +77,15 @@ class ProviderConfiguration extends Component {
       currentProvider = configuredProviders.data.find((provider) => provider.code === providerType);
     }
     let currentProviderTask = null;
-    if (!_.isEqual(configuredProviders.data, this.props.configuredProviders.data)) {
+    if (!_.isEqual(configuredProviders.data, prevProps.configuredProviders.data)) {
       this.setState({currentView: isNonEmptyObject(currentProvider) ? 'result' : 'init'});
     }
 
-    if (getPromiseState(configuredProviders).isEmpty() && !getPromiseState(this.props.configuredProviders).isEmpty()) {
+    if (getPromiseState(configuredProviders).isEmpty() && !getPromiseState(prevProps.configuredProviders).isEmpty()) {
       this.setState({currentView: 'init'});
     }
 
-    if (customerTaskList && isNonEmptyArray(customerTaskList.data) && isNonEmptyObject(currentProvider) && isNonEmptyArray(this.props.tasks.customerTaskList.data) && this.props.tasks.customerTaskList.data.length === 0) {
+    if (customerTaskList && isNonEmptyArray(customerTaskList.data) && isNonEmptyObject(currentProvider) && isNonEmptyArray(prevProps.tasks.customerTaskList.data) && prevProps.tasks.customerTaskList.data.length === 0) {
       currentProviderTask = customerTaskList.data.find((task) => task.targetUUID === currentProvider.uuid);
       if (currentProviderTask) {
         this.props.getCurrentTaskData(currentProviderTask.id);
@@ -84,13 +96,13 @@ class ProviderConfiguration extends Component {
     }
 
     // If Provider Bootstrap task has started, go to provider bootstrap view.
-    if (getPromiseState(this.props.cloud.bootstrapProvider).isLoading() && getPromiseState(bootstrapProvider).isSuccess()) {
+    if (getPromiseState(prevProps.cloud.bootstrapProvider).isLoading() && getPromiseState(bootstrapProvider).isSuccess()) {
       this.setState({currentTaskUUID: bootstrapProvider.data.taskUUID, currentView: 'bootstrap'});
       this.props.getCurrentTaskData(bootstrapProvider.data.taskUUID);
     }
 
-    if (type === "initialize" && nextProps.cloudBootstrap.promiseState.name === "SUCCESS"
-      && this.props.cloudBootstrap.promiseState.name === "LOADING") {
+    if (type === "initialize" && cloudBootstrap.promiseState.name === "SUCCESS"
+      && prevProps.cloudBootstrap.promiseState.name === "LOADING") {
       this.setState({refreshSucceeded: true});
     }
   }
@@ -100,7 +112,8 @@ class ProviderConfiguration extends Component {
     const { configuredProviders, modal: { visibleModal }, configuredRegions, universeList,
             accessKeys, hideDeleteProviderModal, initializeProvider, showDeleteProviderModal,
             deleteProviderConfig, providerType, hostInfo } = this.props;
-    const currentProvider = configuredProviders.data.find((provider) => provider.code === providerType);
+    const currentProvider = configuredProviders.data
+                              .find((provider) => provider.code === providerType) || {};
     let keyPairName = "Not Configured";
     if (isDefinedNotNull(accessKeys) && isNonEmptyArray(accessKeys.data)) {
       const currentAccessKey = accessKeys.data.find((accessKey) => accessKey.idKey.providerUUID === currentProvider.uuid);

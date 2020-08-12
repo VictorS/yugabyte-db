@@ -6,16 +6,19 @@ import { Field, FieldArray } from 'redux-form';
 import {browserHistory} from 'react-router';
 import _ from 'lodash';
 import { isDefinedNotNull, isNonEmptyObject, isNonEmptyString, areIntentsEqual, isEmptyObject,
-  isNonEmptyArray, trimSpecialChars } from 'utils/ObjectUtils';
-import { YBTextInput, YBTextInputWithLabel, YBSelectWithLabel, YBMultiSelectWithLabel, YBRadioButtonBarWithLabel,
-  YBToggle, YBUnControlledNumericInput, YBControlledNumericInputWithLabel, YBDropZone } from 'components/common/forms/fields';
-import { getPromiseState } from 'utils/PromiseUtils';
+  isNonEmptyArray, trimSpecialChars } from '../../../utils/ObjectUtils';
+import {
+  YBTextInput,YBTextInputWithLabel, YBSelectWithLabel, YBMultiSelectWithLabel,
+  YBRadioButtonBarWithLabel, YBToggle, YBUnControlledNumericInput,
+  YBControlledNumericInputWithLabel
+} from '../../../components/common/forms/fields';
+import { getPromiseState } from '../../../utils/PromiseUtils';
 import AZSelectorTable from './AZSelectorTable';
 import './UniverseForm.scss';
 import AZPlacementInfo from './AZPlacementInfo';
 import GFlagArrayComponent from './GFlagArrayComponent';
 import { getPrimaryCluster, getReadOnlyCluster,
-  getClusterByType, isKubernetesUniverse, readUploadedFile } from "../../../utils/UniverseUtils";
+  getClusterByType, isKubernetesUniverse } from "../../../utils/UniverseUtils";
 
 // Default instance types for each cloud provider
 const DEFAULT_INSTANCE_TYPE_MAP = {
@@ -58,9 +61,10 @@ const initialState = {
   assignPublicIP: true,
   hasInstanceTypeChanged: false,
   useTimeSync: false,
-  enableYSQL: false,
+  enableYSQL: true,
   enableNodeToNodeEncrypt: false,
-  enableClientToNodeEncrypt: false
+  enableClientToNodeEncrypt: false,
+  enableEncryptionAtRest: false
 };
 
 export default class ClusterFields extends Component {
@@ -85,14 +89,13 @@ export default class ClusterFields extends Component {
     this.toggleEnableNodeToNodeEncrypt = this.toggleEnableNodeToNodeEncrypt.bind(this);
     this.toggleEnableClientToNodeEncrypt = this.toggleEnableClientToNodeEncrypt.bind(this);
     this.toggleEnableEncryptionAtRest = this.toggleEnableEncryptionAtRest.bind(this);
+    this.handleAwsArnChange = this.handleAwsArnChange.bind(this);
     this.handleSelectAuthConfig = this.handleSelectAuthConfig.bind(this);
-    this.handleUploadKeyPolicy = this.handleUploadKeyPolicy.bind(this);
     this.numNodesChangedViaAzList = this.numNodesChangedViaAzList.bind(this);
     this.replicationFactorChanged = this.replicationFactorChanged.bind(this);
     this.softwareVersionChanged = this.softwareVersionChanged.bind(this);
     this.accessKeyChanged = this.accessKeyChanged.bind(this);
     this.hasFieldChanged = this.hasFieldChanged.bind(this);
-    this.getCurrentUserIntent = this.getCurrentUserIntent.bind(this);
 
     this.currentInstanceType = _.get(this.props.universe,
       'currentUniverse.data.universeDetails.clusters[0].userIntent.instanceType');
@@ -112,9 +115,9 @@ export default class ClusterFields extends Component {
     }
   }
 
-  componentWillMount() {
-    const {formValues, clusterType, updateFormField, type} = this.props;
-    const {universe: {currentUniverse: {data: {universeDetails}}}} = this.props;
+  UNSAFE_componentWillMount() {
+    const { formValues, clusterType, updateFormField, type } = this.props;
+    const { universe: { currentUniverse: { data: { universeDetails }}}} = this.props;
     // Set default software version in case of create
     if (isNonEmptyArray(this.props.softwareVersions) && !isNonEmptyString(this.state.ybSoftwareVersion) && type === "Create") {
       this.setState({ybSoftwareVersion: this.props.softwareVersions[0]});
@@ -137,6 +140,9 @@ export default class ClusterFields extends Component {
       const readOnlyCluster = getReadOnlyCluster(universeDetails.clusters);
       const userIntent = clusterType === "async" ? readOnlyCluster && { ...readOnlyCluster.userIntent, universeName: primaryCluster.userIntent.universeName } : primaryCluster && primaryCluster.userIntent;
       const providerUUID = userIntent && userIntent.provider;
+      const encryptionAtRestEnabled = universeDetails.encryptionAtRestConfig &&
+          universeDetails.encryptionAtRestConfig.encryptionAtRestEnabled;
+
       if (userIntent && providerUUID) {
         const storageType = (userIntent.deviceInfo === null) ? null : userIntent.deviceInfo.storageType;
         this.setState({
@@ -150,7 +156,7 @@ export default class ClusterFields extends Component {
           enableYSQL: userIntent.enableYSQL,
           enableNodeToNodeEncrypt: userIntent.enableNodeToNodeEncrypt,
           enableClientToNodeEncrypt: userIntent.enableClientToNodeEncrypt,
-          enableEncryptionAtRest: userIntent.enableEncryptionAtRest,
+          enableEncryptionAtRest: encryptionAtRestEnabled,
           accessKeyCode: userIntent.accessKeyCode,
           deviceInfo: userIntent.deviceInfo,
           storageType: storageType,
@@ -165,7 +171,7 @@ export default class ClusterFields extends Component {
         this.props.fetchNodeInstanceList(providerUUID);
       }
       // If Edit Case Set Initial Configuration
-      this.props.getExistingUniverseConfiguration(universeDetails);
+      this.props.getExistingUniverseConfiguration(_.cloneDeep(universeDetails));
     } else {
       this.props.getKMSConfigs();
       // Repopulate the form fields when switching back to the view
@@ -211,8 +217,8 @@ export default class ClusterFields extends Component {
     }
   }
 
-  componentWillReceiveProps(nextProps) {
-    const {universe: {currentUniverse}, cloud: {nodeInstanceList, instanceTypes}, clusterType, formValues } = nextProps;
+  UNSAFE_componentWillReceiveProps(nextProps) {
+    const { universe: { currentUniverse }, cloud: { nodeInstanceList, instanceTypes }, clusterType, formValues } = nextProps;
 
     const currentFormValues = formValues[clusterType];
     let providerSelected = this.state.providerSelected;
@@ -265,7 +271,7 @@ export default class ClusterFields extends Component {
     }
 
     if (isNonEmptyArray(nextProps.softwareVersions) && isNonEmptyObject(this.props.formValues[clusterType]) && !isNonEmptyString(this.props.formValues[clusterType].ybSoftwareVersion)) {
-      this.setState({ybSoftwareVersion: nextProps.softwareVersions[0]});
+      this.setState({ybSoftwareVersion: this.props.softwareVersions[0]});
       this.props.updateFormField(`${clusterType}.ybSoftwareVersion`, nextProps.softwareVersions[0]);
     }
 
@@ -297,7 +303,7 @@ export default class ClusterFields extends Component {
     }
     // If nodeInstanceList changes, fetch number of available nodes
     if (getPromiseState(nodeInstanceList).isSuccess() && getPromiseState(this.props.cloud.nodeInstanceList).isLoading()) {
-      let numNodesAvailable = nodeInstanceList.data.reduce(function (acc, val) {
+      let numNodesAvailable = nodeInstanceList.data.reduce((acc, val) => {
         if (!val.inUse) {
           acc++;
         }
@@ -313,34 +319,40 @@ export default class ClusterFields extends Component {
       this.setState({maxNumNodes: numNodesAvailable});
     }
   }
-
   componentDidUpdate(prevProps, prevState) {
-    const { universe: { currentUniverse, universeConfigTemplate }, formValues, clusterType, type } = this.props;
+    const {
+      universe: {
+        currentUniverse,
+        universeConfigTemplate
+        },
+        formValues,
+        clusterType,
+        setPlacementStatus,
+        toggleDisableSubmit,
+        type
+      } = this.props;
     let currentProviderUUID = this.state.providerSelected;
-    const self = this;
 
     if (isNonEmptyObject(formValues[clusterType]) && isNonEmptyString(formValues[clusterType].provider)) {
       currentProviderUUID = formValues[clusterType].provider;
     }
     const currentProvider = this.getCurrentProvider(currentProviderUUID);
 
-    const configureIntentValid = function() {
-      return (!_.isEqual(self.state, prevState)) &&
+    const configureIntentValid = () => {
+      return (!_.isEqual(this.state, prevState)) &&
         isNonEmptyObject(currentProvider) &&
         isNonEmptyArray(formValues[clusterType].regionList) &&
         (prevState.maxNumNodes !== -1 || currentProvider.code !== "onprem") &&
         ((currentProvider.code === "onprem" &&
-        self.state.numNodes <= self.state.maxNumNodes) || (currentProvider.code !== "onprem")) &&
-        self.state.numNodes >= self.state.replicationFactor &&
-        !self.state.nodeSetViaAZList;
+        this.state.numNodes <= this.state.maxNumNodes) || (currentProvider.code !== "onprem")) &&
+        this.state.numNodes >= this.state.replicationFactor &&
+        !this.state.nodeSetViaAZList;
     };
 
     // Fire Configure only if either provider is not on-prem or maxNumNodes is not -1 if on-prem
     if (configureIntentValid()) {
       if (isNonEmptyObject(currentUniverse.data)) {
-        if (this.hasFieldChanged()) {
-          this.configureUniverseNodeList();
-        } else {
+        if (!this.hasFieldChanged()) {
           const placementStatusObject = {
             error: {
               type: "noFieldsChanged",
@@ -348,24 +360,37 @@ export default class ClusterFields extends Component {
               maxNumNodes: this.state.maxNumNodes
             }
           };
-          this.props.setPlacementStatus(placementStatusObject);
-          this.configureUniverseNodeList();
+          setPlacementStatus(placementStatusObject);
         }
-      } else {
-        this.configureUniverseNodeList();
       }
-    } else if (isNonEmptyArray(this.state.regionList) && currentProvider &&
-      currentProvider.code === "onprem" && this.state.instanceTypeSelected &&
-      this.state.numNodes > this.state.maxNumNodes) {
-
-      const placementStatusObject = {
-        error: {
-          type: "notEnoughNodesConfigured",
-          numNodes: this.state.numNodes,
-          maxNumNodes: this.state.maxNumNodes
+      this.configureUniverseNodeList();
+    } else if (currentProvider && currentProvider.code === 'onprem') {
+      toggleDisableSubmit(false);
+      if (isNonEmptyArray(this.state.regionList) && currentProvider &&
+          this.state.instanceTypeSelected && this.state.numNodes > this.state.maxNumNodes) {
+        const placementStatusObject = {
+          error: {
+            type: 'notEnoughNodesConfigured',
+            numNodes: this.state.numNodes,
+            maxNumNodes: this.state.maxNumNodes
+          }
+        };
+        setPlacementStatus(placementStatusObject);
+        toggleDisableSubmit(true);
+      } else if (isNonEmptyObject(currentUniverse.data)) {
+        const primaryCluster =
+            currentUniverse.data.universeDetails.clusters.find(x => x.clusterType === 'PRIMARY');
+        const provider = primaryCluster.placementInfo.cloudList.find(c => c.uuid === currentProvider.uuid);
+        const replication = primaryCluster.userIntent.replicationFactor;
+        if (provider) {
+          const numAzs = provider.regionList.reduce((acc, current) => acc + current.azList.length, 0);
+          setPlacementStatus({
+            replicationFactor: replication,
+            numUniqueAzs: numAzs,
+            numUniqueRegions: provider.regionList.length
+          });
         }
-      };
-      this.props.setPlacementStatus(placementStatusObject);
+      }
     }
     //hook from parent universeForm to check if any fields was changed
     const nodeDetailsSet = getPromiseState(currentUniverse).isSuccess() && getPromiseState(universeConfigTemplate).isSuccess() ? universeConfigTemplate.data.nodeDetailsSet : [];
@@ -378,7 +403,7 @@ export default class ClusterFields extends Component {
 
 
   numNodesChangedViaAzList(value) {
-    const {updateFormField, clusterType} = this.props;
+    const { updateFormField, clusterType } = this.props;
     this.setState({nodeSetViaAZList: true, numNodes: value});
     updateFormField(`${clusterType}.numNodes`, value);
   }
@@ -402,6 +427,7 @@ export default class ClusterFields extends Component {
         numVolumes: volumesList.length,
         mountPoints: mountPoints,
         storageType: volumeDetail.volumeType === "EBS" ? DEFAULT_STORAGE_TYPES['AWS'] : DEFAULT_STORAGE_TYPES['GCP'],
+        storageClass: 'standard',
         diskIops: null
       };
       updateFormField(`${clusterType}.volumeSize`, volumeDetail.volumeSizeGB);
@@ -413,45 +439,14 @@ export default class ClusterFields extends Component {
     }
   }
 
-  getCurrentUserIntent = () => {
-    const {formValues, clusterType, universe: { currentUniverse } } = this.props;
-    const primaryCluster = getPrimaryCluster(currentUniverse.data.universeDetails.clusters);
-    if (formValues[clusterType]) {
-      return {
-        universeName: primaryCluster.userIntent.universeName,
-        numNodes: formValues[clusterType].numNodes,
-        provider: formValues[clusterType].provider,
-        providerType: this.getCurrentProvider(formValues[clusterType].provider).code,
-        regionList: formValues[clusterType].regionList.map((a)=>(a.value)),
-        instanceType: formValues[clusterType].instanceType,
-        ybSoftwareVersion: formValues[clusterType].ybSoftwareVersion,
-        replicationFactor: formValues[clusterType].replicationFactor,
-        deviceInfo: {
-          volumeSize: formValues[clusterType].volumeSize,
-          numVolumes: formValues[clusterType].numVolumes,
-          diskIops: formValues[clusterType].diskIops,
-          mountPoints: formValues[clusterType].mountPoints,
-          storageType: formValues[clusterType].storageType
-        },
-        accessKeyCode: formValues[clusterType].accessKeyCode,
-        gflags: formValues[clusterType].gflags,
-        instanceTags: formValues[clusterType].instanceTags,
-        useTimeSync: formValues[clusterType].useTimeSync,
-        enableYSQL: formValues[clusterType].enableYSQL,
-        enableNodeToNodeEncrypt: formValues[clusterType].enableNodeToNodeEncrypt,
-        enableClientToNodeEncrypt: formValues[clusterType].enableClientToNodeEncrypt
-      };
-    }
-  };
-
   softwareVersionChanged(value) {
-    const {updateFormField, clusterType} = this.props;
+    const { updateFormField, clusterType } = this.props;
     this.setState({ybSoftwareVersion: value});
     updateFormField(`${clusterType}.ybSoftwareVersion`, value);
   }
 
   storageTypeChanged(storageValue) {
-    const {updateFormField, clusterType} = this.props;
+    const { updateFormField, clusterType } = this.props;
     const currentDeviceInfo = _.clone(this.state.deviceInfo);
     currentDeviceInfo.storageType = storageValue;
     if (currentDeviceInfo.storageType === "IO1" && currentDeviceInfo.diskIops == null) {
@@ -492,7 +487,7 @@ export default class ClusterFields extends Component {
 
 
   toggleAssignPublicIP(event) {
-    const {updateFormField, clusterType} = this.props;
+    const { updateFormField, clusterType } = this.props;
     // Right now we only let primary cluster to update this flag, and
     // keep the async cluster to use the same value as primary.
     if (clusterType === "primary") {
@@ -503,7 +498,7 @@ export default class ClusterFields extends Component {
   }
 
   toggleEnableYSQL(event) {
-    const {updateFormField, clusterType} = this.props;
+    const { updateFormField, clusterType } = this.props;
     // Right now we only let primary cluster to update this flag, and
     // keep the async cluster to use the same value as primary.
     if (clusterType === "primary") {
@@ -514,7 +509,7 @@ export default class ClusterFields extends Component {
   }
 
   toggleEnableNodeToNodeEncrypt(event) {
-    const {updateFormField, clusterType} = this.props;
+    const { updateFormField, clusterType } = this.props;
     // Right now we only let primary cluster to update this flag, and
     // keep the async cluster to use the same value as primary.
     if (clusterType === "primary") {
@@ -525,7 +520,7 @@ export default class ClusterFields extends Component {
   }
 
   toggleEnableClientToNodeEncrypt(event) {
-    const {updateFormField, clusterType} = this.props;
+    const { updateFormField, clusterType } = this.props;
     // Right now we only let primary cluster to update this flag, and
     // keep the async cluster to use the same value as primary.
     if (clusterType === "primary") {
@@ -543,24 +538,19 @@ export default class ClusterFields extends Component {
     }
   }
 
+  handleAwsArnChange(event) {
+    const { updateFormField } = this.props;
+    updateFormField('primary.awsArnString', event.target.value);
+  }
+
   handleSelectAuthConfig(value) {
     const { updateFormField, clusterType } = this.props;
     updateFormField(`${clusterType}.selectEncryptionAtRestConfig`, value);
     this.setState({selectEncryptionAtRestConfig: value});
   }
 
-  handleUploadKeyPolicy(e, file) {
-    const { updateFormField, clusterType } = this.props;
-    updateFormField(`${clusterType}.useCmkPolicy`, file);
-    this.setState({useCmkPolicy: file});
-
-    readUploadedFile(file).then(text => {
-      updateFormField(`${clusterType}.cmkPolicyContent`, text);
-    });
-  }
-
   replicationFactorChanged = value => {
-    const {updateFormField, clusterType, universe: {currentUniverse: {data}}} = this.props;
+    const { updateFormField, clusterType, universe: { currentUniverse: { data }}} = this.props;
     const clusterExists = isDefinedNotNull(data.universeDetails) ? isEmptyObject(getClusterByType(data.universeDetails.clusters, clusterType)) : null;
     const self = this;
 
@@ -576,20 +566,20 @@ export default class ClusterFields extends Component {
   };
 
   hasFieldChanged = () => {
-    const {universe: {currentUniverse}, clusterType} = this.props;
+    const { universe: { currentUniverse }, clusterType, getCurrentUserIntent } = this.props;
     if (isEmptyObject(currentUniverse.data) || isEmptyObject(currentUniverse.data.universeDetails)) {
       return true;
     }
     const currentCluster = getClusterByType(currentUniverse.data.universeDetails.clusters, clusterType);
     const existingIntent = isNonEmptyObject(currentCluster) ?
       _.clone(currentCluster.userIntent, true) : null;
-    const currentIntent = this.getCurrentUserIntent();
+    const currentIntent = getCurrentUserIntent(clusterType);
 
     return !areIntentsEqual(existingIntent, currentIntent);
   };
 
   handleUniverseConfigure(universeTaskParams) {
-    const {universe: {universeConfigTemplate, currentUniverse}, formValues, clusterType} = this.props;
+    const { universe: { universeConfigTemplate, currentUniverse }, formValues, clusterType } = this.props;
 
     const instanceType = formValues[clusterType].instanceType;
     const regionList = formValues[clusterType].regionList;
@@ -610,7 +600,7 @@ export default class ClusterFields extends Component {
         }
       } else {
         // Create flow
-        if (isEmptyObject(universeConfigTemplate.data)) {
+        if (isEmptyObject(universeConfigTemplate.data) || universeConfigTemplate.data == null) {
           this.props.submitConfigureUniverse(universeTaskParams);
         } else {
           const currentClusterConfiguration = getClusterByType(universeConfigTemplate.data.clusters, clusterType);
@@ -626,28 +616,14 @@ export default class ClusterFields extends Component {
     }
   }
 
-  updateTaskParams = (universeTaskParams, userIntent, clusterType) => {
-    const cluster = getClusterByType(universeTaskParams.clusters, clusterType);
-    universeTaskParams.currentClusterType = clusterType.toUpperCase();
-    const isEdit = this.props.type === "Edit" ||
-      (this.props.type === "Async" && this.state.isReadOnlyExists);
-
-    if (isDefinedNotNull(cluster)) {
-      cluster.userIntent = userIntent;
-    } else {
-      if (isEmptyObject(universeTaskParams.clusters)) {
-        universeTaskParams.clusters = [];
-      }
-      universeTaskParams.clusters.push({
-        clusterType: clusterType.toUpperCase(),
-        userIntent: userIntent
-      });
-    }
-    universeTaskParams.clusterOperation = isEdit ? "EDIT": "CREATE";
-  }
-
   configureUniverseNodeList() {
-    const {universe: {universeConfigTemplate, currentUniverse}, formValues, clusterType} = this.props;
+    const {
+      universe: { universeConfigTemplate, currentUniverse },
+      formValues,
+      clusterType,
+      getCurrentUserIntent,
+      updateTaskParams
+    } = this.props;
     const { hasInstanceTypeChanged } = this.state;
     const currentProviderUUID = this.state.providerSelected;
     let universeTaskParams = {};
@@ -662,43 +638,13 @@ export default class ClusterFields extends Component {
       universeTaskParams.expectedUniverseVersion = currentUniverse.data.version;
     }
 
-    const userIntent = {
-      universeName: formValues[clusterType].universeName,
-      provider: formValues[clusterType].provider,
-      regionList: formValues[clusterType].regionList && formValues[clusterType].regionList.map(function (item) {
-        return item.value;
-      }),
-      assignPublicIP: formValues[clusterType].assignPublicIP,
-      useTimeSync: formValues[clusterType].useTimeSync,
-      enableYSQL: formValues[clusterType].enableYSQL,
-      enableNodeToNodeEncrypt: formValues[clusterType].enableNodeToNodeEncrypt,
-      enableClientToNodeEncrypt: formValues[clusterType].enableClientToNodeEncrypt,
-      numNodes: formValues[clusterType].numNodes,
-      instanceType: formValues[clusterType].instanceType,
-      ybSoftwareVersion: formValues[clusterType].ybSoftwareVersion,
-      replicationFactor: formValues[clusterType].replicationFactor,
-      deviceInfo: {
-        volumeSize: formValues[clusterType].volumeSize,
-        numVolumes: formValues[clusterType].numVolumes,
-        mountPoints: formValues[clusterType].mountPoints,
-        storageType: formValues[clusterType].storageType,
-        diskIops: formValues[clusterType].diskIops
-      },
-      accessKeyCode: formValues[clusterType].accessKeyCode
-    };
-
+    const userIntent = getCurrentUserIntent(clusterType);    
     if (hasInstanceTypeChanged !==
       (formValues[clusterType].instanceType !== this.currentInstanceType)
     ) {
       this.setState({ hasInstanceTypeChanged: !hasInstanceTypeChanged });
     }
 
-    if (isNonEmptyObject(formValues[clusterType].masterGFlags)) {
-      userIntent["masterGFlags"] = formValues[clusterType].masterGFlags;
-    }
-    if (isNonEmptyObject(formValues[clusterType].tserverGFlags)) {
-      userIntent["tserverGFlags"] = formValues[clusterType].tserverGFlags;
-    }
     if (isNonEmptyObject(formValues[clusterType].instanceTags) && currentProviderUUID && this.getCurrentProvider(currentProviderUUID).code === "aws") {
       userIntent["instanceTags"] = formValues[clusterType].instanceTags;
     }
@@ -709,7 +655,9 @@ export default class ClusterFields extends Component {
       }
     });
 
-    this.updateTaskParams(universeTaskParams, userIntent, clusterType);
+    const isEdit = this.props.type === "Edit" ||
+      (this.props.type === "Async" && this.state.isReadOnlyExists);
+    updateTaskParams(universeTaskParams, userIntent, clusterType, isEdit);
     universeTaskParams.userAZSelected = false;
     this.handleUniverseConfigure(universeTaskParams);
   }
@@ -824,15 +772,18 @@ export default class ClusterFields extends Component {
       cloud.ebsTypes && cloud.ebsTypes.sort().map(function (ebsType, idx) {
         return <option key={ebsType} value={ebsType}>{ebsType}</option>;
       });
-    const gcpTypesList = 
+    const gcpTypesList =
       cloud.gcpTypes.data && cloud.gcpTypes.data.sort().map(function (gcpType, idx) {
         return <option key={gcpType} value={gcpType}>{API_UI_STORAGE_TYPES[gcpType]}</option>;
       });
     const kmsConfigList = [
-      <option value="0" key={`kms-option-0`}>Use auto-generated key</option>,
-      ...cloud.authConfig.data.map((config, index) => (
-        <option value={config.provider} key={`kms-option-${index + 1}`}>{config.provider}</option>
-      ))
+      <option value="0" key={`kms-option-0`}>Select Configuration</option>,
+      ...cloud.authConfig.data.map((config, index) => {
+        const labelName = config.metadata.provider + " - " + config.metadata.name;
+        return (<option value={
+          config.metadata.configUUID
+        } key={`kms-option-${index + 1}`}>{labelName}</option>);
+      })
     ];
     const isFieldReadOnly = isNonEmptyObject(universe.currentUniverse.data) && (this.props.type === "Edit" || (this.props.type === "Async" && this.state.isReadOnlyExists));
 
@@ -864,7 +815,7 @@ export default class ClusterFields extends Component {
         const isInAws = currentProvider.code === 'aws';
         const isInGcp = currentProvider.code === 'gcp';
         // We don't want to keep the volume fixed in case of Kubernetes or persistent GCP storage.
-        const fixedVolumeInfo = self.state.volumeType === 'SSD' && 
+        const fixedVolumeInfo = self.state.volumeType === 'SSD' &&
           currentProvider.code !== 'kubernetes' && deviceInfo.storageType === "Scratch";
         const fixedNumVolumes = self.state.volumeType === 'SSD' &&
           currentProvider.code !== 'kubernetes' && currentProvider.code !== 'gcp';
@@ -931,17 +882,15 @@ export default class ClusterFields extends Component {
     let selectTlsCert = <span />;
     let enableEncryptionAtRest = <span />;
     let selectEncryptionAtRestConfig = <span />;
-    let useCmkPolicy = <span />;
     const currentProvider = this.getCurrentProvider(currentProviderUUID);
-
+    const disableToggleOnChange = clusterType !== "primary";
     if (isDefinedNotNull(currentProvider) &&
        (currentProvider.code === "aws" || currentProvider.code === "gcp" ||
         currentProvider.code === "onprem" || currentProvider.code === "kubernetes")){
-      const disableOnChange = clusterType !== "primary";
       enableYSQL = (
         <Field name={`${clusterType}.enableYSQL`}
           component={YBToggle} isReadOnly={isFieldReadOnly}
-          disableOnChange={disableOnChange}
+          disableOnChange={disableToggleOnChange}
           checkedVal={this.state.enableYSQL}
           onToggle={this.toggleEnableYSQL}
           label="Enable YSQL"
@@ -950,7 +899,7 @@ export default class ClusterFields extends Component {
       enableNodeToNodeEncrypt = (
         <Field name={`${clusterType}.enableNodeToNodeEncrypt`}
           component={YBToggle} isReadOnly={isFieldReadOnly}
-          disableOnChange={disableOnChange}
+          disableOnChange={disableToggleOnChange}
           checkedVal={this.state.enableNodeToNodeEncrypt}
           onToggle={this.toggleEnableNodeToNodeEncrypt}
           label="Enable Node-to-Node TLS"
@@ -959,7 +908,7 @@ export default class ClusterFields extends Component {
       enableClientToNodeEncrypt = (
         <Field name={`${clusterType}.enableClientToNodeEncrypt`}
           component={YBToggle} isReadOnly={isFieldReadOnly}
-          disableOnChange={disableOnChange}
+          disableOnChange={disableToggleOnChange}
           checkedVal={this.state.enableClientToNodeEncrypt}
           onToggle={this.toggleEnableClientToNodeEncrypt}
           label="Enable Client-to-Node TLS"
@@ -968,7 +917,7 @@ export default class ClusterFields extends Component {
       enableEncryptionAtRest = (
         <Field name={`${clusterType}.enableEncryptionAtRest`}
           component={YBToggle} isReadOnly={isFieldReadOnly}
-          disableOnChange={disableOnChange}
+          disableOnChange={disableToggleOnChange}
           checkedVal={this.state.enableEncryptionAtRest}
           onToggle={this.toggleEnableEncryptionAtRest}
           label="Enable Encryption at Rest"
@@ -983,21 +932,10 @@ export default class ClusterFields extends Component {
             component={YBSelectWithLabel}
             label="Key Management Service Config"
             options={kmsConfigList}
-            input={{
-              onChange: this.handleSelectAuthConfig
-            }}
+            onInputChanged={this.handleSelectAuthConfig}
+            readOnlySelect={isFieldReadOnly}
           />
         );
-        if (this.state.selectEncryptionAtRestConfig === 'AWS') {
-          useCmkPolicy = (
-            <div className={"right-side-form-field"}>
-              <Field component={YBDropZone} name={`${clusterType}.useCmkPolicy`}
-                title={"Upload CM Key Policy"} className="upload-file-button"
-                onChange={this.handleUploadKeyPolicy}
-              />
-            </div>
-          );
-        }
       }
     }
 
@@ -1027,16 +965,15 @@ export default class ClusterFields extends Component {
         );
       }
     }
-    
+
     if (isDefinedNotNull(currentProvider) &&
         (currentProvider.code === "aws" || currentProvider.code === "gcp")) {
       // Assign public ip would be only enabled for primary and that same
       // value will be used for async as well.
-      const disableOnChange = clusterType !== "primary";
       assignPublicIP = (
         <Field name={`${clusterType}.assignPublicIP`}
           component={YBToggle} isReadOnly={isFieldReadOnly}
-          disableOnChange={disableOnChange}
+          disableOnChange={disableToggleOnChange}
           checkedVal={this.state.assignPublicIP}
           onToggle={this.toggleAssignPublicIP}
           label="Assign Public IP"
@@ -1115,12 +1052,14 @@ export default class ClusterFields extends Component {
     if (self.props.universe.currentPlacementStatus) {
       placementStatus = <AZPlacementInfo placementInfo={self.props.universe.currentPlacementStatus}/>;
     }
+    const configTemplate = self.props.universe.universeConfigTemplate;
+    const showPlacementStatus = configTemplate && !!getPrimaryCluster(configTemplate);
     const azSelectorTable = (
       <div>
         <AZSelectorTable {...this.props} clusterType={clusterType}
           numNodesChangedViaAzList={this.numNodesChangedViaAzList} minNumNodes={this.state.replicationFactor}
           maxNumNodes={this.state.maxNumNodes} currentProvider={this.getCurrentProvider(currentProviderUUID)} isKubernetesUniverse={this.state.isKubernetesUniverse} />
-        {placementStatus}
+        {showPlacementStatus && placementStatus}
       </div>);
 
     if (clusterType === "primary") {
@@ -1268,9 +1207,6 @@ export default class ClusterFields extends Component {
                 <Row>
                   {selectEncryptionAtRestConfig}
                 </Row>
-                <Row>
-                  {useCmkPolicy}
-                </Row>
               </div>
             </Col>
           </Row>
@@ -1295,6 +1231,17 @@ export default class ClusterFields extends Component {
             </Col>
             }
           </Row>
+          {isDefinedNotNull(currentProvider) && currentProvider.code === "aws" &&
+            <Row>
+              <Col sm={5} md={4}>
+                <div className="form-right-aligned-labels">
+                  <Field name={`${clusterType}.awsArnString`}
+                      type="text" component={YBTextInputWithLabel}
+                      label="Instance Profile ARN" isReadOnly={isFieldReadOnly} />
+                </div>
+              </Col>
+            </Row>
+          }
         </div>
         <div className="form-section" data-yb-section="g-flags">
           {gflagArray}

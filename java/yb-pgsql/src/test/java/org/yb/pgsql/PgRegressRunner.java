@@ -13,6 +13,7 @@
 package org.yb.pgsql;
 
 import org.apache.commons.io.FileUtils;
+import org.apache.commons.io.FilenameUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.yb.client.TestUtils;
@@ -23,10 +24,14 @@ import org.yb.minicluster.LogPrinter;
 import org.yb.util.*;
 
 import java.io.*;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.*;
 import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 /**
  * A wrapper for running the pg_regress utility.
@@ -77,11 +82,34 @@ public class PgRegressRunner {
           "expected", "output", "sql", "data"}) {
         FileUtils.copyDirectory(new File(pgRegressDir, name), new File(pgRegressOutputDir, name));
       }
-      FileUtils.copyFile(new File(pgRegressDir, schedule), new File(pgRegressOutputDir, schedule));
+      File scheduleInputFile = new File(pgRegressDir, schedule);
+      File scheduleOutputFile = new File(pgRegressOutputDir, schedule);
+
+      // Copy the schedule file, replacing some lines based on the operating system.
+      try (BufferedReader scheduleReader = new BufferedReader(new FileReader(scheduleInputFile));
+           PrintWriter scheduleWriter = new PrintWriter(new FileWriter(scheduleOutputFile))) {
+        String line;
+        while ((line = scheduleReader.readLine()) != null) {
+          line = line.trim();
+          if (line.equals("test: yb_inet") && !TestUtils.IS_LINUX) {
+            // We only support IPv6-specific tests in yb_inet.sql on Linux, not on macOS.
+            line = "test: yb_inet_ipv4only";
+          }
+          LOG.info("Schedule output line: " + line);
+          scheduleWriter.println(line);
+        }
+      }
+      // TODO(dmitry): Workaround for #1721, remove after fix.
+      for (File f : (new File(pgRegressOutputDir, "sql")).listFiles()) {
+        try (FileWriter fr = new FileWriter(f, true)) {
+          fr.write("\n-- YB_DATA_END\nDISCARD TEMP;");
+        }
+      }
     } catch (IOException ex) {
       LOG.error("Failed to copy pgregress data from " + pgRegressDir + " to " + pgRegressOutputDir);
       throw new RuntimeException(ex);
     }
+
 
     this.pgSchedule = schedule;
     this.pgHost = pgHost;
@@ -128,7 +156,7 @@ public class PgRegressRunner {
             "--user=" + pgUser,
             "--dbname=yugabyte",
             "--use-existing",
-            "--schedule=" + pgSchedule,
+            "--schedule=" + new File(pgRegressOutputDir, pgSchedule),
             "--outputdir=" + pgRegressOutputDir);
     procBuilder.directory(pgRegressDir);
     procBuilder.environment().putAll(extraEnvVars);
@@ -199,6 +227,44 @@ public class PgRegressRunner {
         LOG.warn("Side-by-side diff between expected output and actual output:\n" +
             new SideBySideDiff(expectedFile, resultFile).getSideBySideDiff());
       }
+    }
+
+    if (!ConfForTesting.isCI()) {
+      final Path pgRegressOutputPath = Paths.get(pgRegressOutputDir.toString());
+
+      final Path resultsDirPath = pgRegressOutputPath.resolve("results");
+      Set<String> resultFileNames = Files.find(
+          resultsDirPath,
+          1,  // maxDepth
+          (filePath, fileAttr) -> fileAttr.isRegularFile()
+      ).map(path ->
+          FilenameUtils.removeExtension(resultsDirPath.relativize(path).getFileName().toString())
+      ).collect(Collectors.toSet());
+
+      LOG.info("Copying test result files and generated SQL and expected output " +
+               pgRegressOutputPath + " back to " + getPgRegressDir());
+      final Set<String> copiedFiles = new TreeSet<>();
+      final Set<String> failedFiles = new TreeSet<>();
+      final Set<String> skippedFiles = new TreeSet<>();
+      Files.find(
+          pgRegressOutputPath,
+          Integer.MAX_VALUE,
+          (filePath, fileAttr) -> fileAttr.isRegularFile()
+      ).forEach(pathToCopy -> {
+        String fileName = pathToCopy.toFile().getName();
+        String relPathStr = pgRegressOutputPath.relativize(pathToCopy).toString();
+        if ((fileName.endsWith(".out") || fileName.endsWith(".diffs")) &&
+            !relPathStr.startsWith("expected/")) {
+          File srcFile = pathToCopy.toFile();
+          File destFile = new File(getPgRegressDir(), relPathStr);
+          LOG.info("Copying file " + srcFile + " to " + destFile);
+          try {
+            FileUtils.copyFile(srcFile, destFile);
+          } catch (IOException ex) {
+            LOG.warn("Failed copying file " + srcFile + " to " + destFile, ex);
+          }
+        }
+      });
     }
 
     if (EnvAndSysPropertyUtil.isEnvVarOrSystemPropertyTrue("YB_PG_REGRESS_IGNORE_RESULT")) {

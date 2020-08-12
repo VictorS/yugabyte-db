@@ -2,6 +2,7 @@
 title: IoT - Spark & Kafka
 linkTitle: IoT Fleet Management
 description: IoT Fleet Management - Spark and Kafka
+block_indexing: true
 menu:
   v1.0:
     identifier: iot-spark-kafka
@@ -11,8 +12,7 @@ menu:
 
 ## Overview
 
-This is an end-to-end functional application. It is a blueprint for an IoT application built on top of YugabyteDB (Cassandra API) as the database, Kafka as the message broker, Spark for realtime analytics and Spring Boot as the application framework. The stack used for this application is very similar to the SMACK stack (Spark, Mesos, Akka, Yugabyte Cassandra, Kafka), which is a popular stack for developing IoT applications.
-
+This is an end-to-end functional application. It is a blueprint for an IoT application built on top of YugabyteDB (Cassandra API) as the database, Kafka as the message broker, Spark for realtime analytics and Spring Boot as the application framework. The stack used for this application is very similar to the SMACK stack (Spark, Mesos, Akka, YugabyteDB, Kafka), which is a popular stack for developing IoT applications.
 
 ## Scenario
 
@@ -22,8 +22,6 @@ Assume that a fleet management company wants to track their fleet of vehicles wh
 - which vehicles are near road closures so that they can predict delays in deliveries
 
 This app renders a dashboard showing both of the above. Below is a view of the realtime, auto-refreshing dashboard.
-
-![YB IoT Fleet Management Dashboard](/images/develop/realworld-apps/iot-spark-kafka/yb-iot-fleet-management-screenshot.png)
 
 
 ## App Architecture
@@ -36,8 +34,6 @@ This application has the following subcomponents:
 - Data Dashboard - Spring Boot app using web sockets, jQuery and bootstrap
 
 We will look at each of these components in detail. Below is an architecture diagram showing how these components fit together.
-
-![YB IoT Fleet Management Architecture](/images/develop/realworld-apps/iot-spark-kafka/yb-iot-fleet-mgmt-arch.png)
 
 
 ## Data Store

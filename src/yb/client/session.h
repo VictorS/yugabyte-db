@@ -19,6 +19,7 @@
 #include "yb/client/client_fwd.h"
 
 #include "yb/common/common_fwd.h"
+#include "yb/common/hybrid_time.h"
 
 #include "yb/util/async_util.h"
 #include "yb/util/locks.h"
@@ -102,6 +103,13 @@ class YBSession : public std::enable_shared_from_this<YBSession> {
 
   // Returns true if our current read point requires restart.
   bool IsRestartRequired();
+
+  // Defer the read hybrid time to the global limit.  Since the global limit should not change for a
+  // session, this call is idempotent.
+  void DeferReadPoint();
+
+  // Used for backfilling the index, where we may want to write with a historic timestamp.
+  void SetHybridTimeForWrite(const HybridTime ht);
 
   // Changed transaction used by this session.
   void SetTransaction(YBTransactionPtr transaction);
@@ -239,7 +247,7 @@ class YBSession : public std::enable_shared_from_this<YBSession> {
 
   ConsistentReadPoint* read_point();
 
-  void SetMemoryLimitScore(double score);
+  void SetRejectionScoreSource(RejectionScoreSourcePtr rejection_score_source);
 
  private:
   friend class YBClient;
@@ -277,9 +285,12 @@ class YBSession : public std::enable_shared_from_this<YBSession> {
   // Timeout for the next batch.
   MonoDelta timeout_;
 
+  // HybridTime for Write. Used for Index Backfill.
+  HybridTime hybrid_time_for_write_;
+
   internal::AsyncRpcMetricsPtr async_rpc_metrics_;
 
-  double memory_limit_score_ = 0.0;
+  RejectionScoreSourcePtr rejection_score_source_;
 
   DISALLOW_COPY_AND_ASSIGN(YBSession);
 };

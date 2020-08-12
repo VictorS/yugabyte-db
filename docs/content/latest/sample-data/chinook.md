@@ -1,7 +1,8 @@
 ---
 title: Chinook sample database
+headerTitle: Chinook sample database
 linkTitle: Chinook
-description: Chinook sample database
+description: Use the Chinook sample database for a media store to explore and learn YugabyteDB.
 menu:
   latest:
     identifier: chinook
@@ -31,13 +32,11 @@ For details, here's the entity relationship diagram of the Chinook data model.
 
 ![Chinook ER diagram](/images/sample-data/chinook/chinook-er-diagram.png)
 
-## Install the Chinook database
-
-Follow the steps here to download and install the Chinook sample database.
-
-### Before you begin
+## Before you begin
 
 To install and use the Chinook sample database, you need to have installed and configured YugabyteDB. To get up and running quickly, see [Quick Start](/latest/quick-start/).
+
+Install the Chinook sample database
 
 ### 1. Download the SQL scripts
 
@@ -49,9 +48,13 @@ You can download the Chinook database that is compatible with YugabyteDB from th
 
 ### 2. Open the YSQL shell
 
-To open the YSQL shell, run the `ysqlsh` command.
+To open the YSQL shell, run the `ysqlsh` command from the YugabyteDB root directory.
 
 ```sh
+$ ./bin/ysqlsh
+```
+
+```
 ysqlsh (11.2)
 Type "help" for help.
 yugabyte=#
@@ -62,20 +65,23 @@ yugabyte=#
 To create the `chinook` database, run the following command.
 
 ```postgresql
-CREATE DATABASE chinook;
+yugabyte=# CREATE DATABASE chinook;
 ```
 
 Confirm that you have the `chinook` database by using the `\l` command to list the databases on your cluster.
 
-```
+```postgresql
 yugabyte=# \l
 ```
 
 Connect to the `chinook` database.
 
-```
+```postgresql
 yugabyte=# \c chinook
-You are now connected to database "chinook" as user "postgres".
+```
+
+```
+You are now connected to database "chinook" as user "yugabyte".
 chinook=#
 ```
 
@@ -83,13 +89,13 @@ chinook=#
 
 To build the tables and database objects, run the following `\i` command.
 
-```
-chinook=# \i /Users/yugabyte/chinook_ddl.sql
+```postgresql
+chinook=# \i share/chinook_ddl.sql
 ```
 
-You can verify that all 14 tables have been created by running the `\d` command.
+You can verify that all 11 tables have been created by running the `\d` command.
 
-```
+```postgresql
 chinook=# \d
 ```
 
@@ -99,14 +105,14 @@ To load the `chinook` database with sample data, you need to run the SQL scripts
 
 First, run the SQL script to load the genres, artists, and albums.
 
-```
-chinook=# \i /Users/yugabyte/chinook_genres_artists_albums.sql
+```postgresql
+chinook=# \i share/chinook_genres_artists_albums.sql
 ```
 
 Next, run the SQL script to load the songs.
 
-```
-chinook=# \i /Users/yugabyte/chinook_songs.sql
+```postgresql
+chinook=# \i share/chinook_songs.sql
 ```
 
 Now verify that you have data by running a simple `SELECT` statement to pull some data from the `Track` table.

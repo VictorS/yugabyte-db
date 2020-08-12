@@ -50,6 +50,9 @@ class CQLMetrics : public ql::QLMetrics {
 
   scoped_refptr<AtomicGauge<int64_t>> cql_processors_alive_;
   scoped_refptr<Counter> cql_processors_created_;
+
+  scoped_refptr<AtomicGauge<int64_t>> parsers_alive_;
+  scoped_refptr<Counter> parsers_created_;
 };
 
 
@@ -66,6 +69,11 @@ class CQLProcessor : public ql::QLProcessor {
 
   // Processing an inbound call.
   void ProcessCall(rpc::InboundCallPtr call);
+
+  // Release the processor back to the CQLServiceImpl.
+  void Release();
+
+  void Shutdown();
 
  protected:
   bool NeedReschedule() override;
@@ -97,6 +105,7 @@ class CQLProcessor : public ql::QLProcessor {
                             boost::optional<CQLMessage::QueryId> query_id = boost::none);
 
   // Send response back to client.
+  void PrepareAndSendResponse(const std::unique_ptr<CQLResponse>& response);
   void SendResponse(const CQLResponse& response);
 
   // Pointer to the containing CQL service implementation.
@@ -125,6 +134,8 @@ class CQLProcessor : public ql::QLProcessor {
 
   // Statement executed callback.
   ql::StatementExecutedCallback statement_executed_cb_;
+
+  ScopedTrackedConsumption consumption_;
 
   //----------------------------------------------------------------------------------------------
 

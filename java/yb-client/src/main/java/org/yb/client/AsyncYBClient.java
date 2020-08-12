@@ -310,12 +310,17 @@ public class AsyncYBClient implements AutoCloseable {
   }
 
   public Deferred<SetFlagResponse> setFlag(final HostAndPort hp, String flag, String value) {
+   return this.setFlag(hp, flag, value, false);
+  }
+
+  public Deferred<SetFlagResponse> setFlag(final HostAndPort hp, String flag, String value,
+                                           boolean force) {
     checkIsClosed();
     TabletClient client = newSimpleClient(hp);
     if (client == null) {
       throw new IllegalStateException("Could not create a client to " + hp.toString());
     }
-    SetFlagRequest rpc = new SetFlagRequest(flag, value);
+    SetFlagRequest rpc = new SetFlagRequest(flag, value, force);
     rpc.setTimeoutMillis(defaultAdminOperationTimeoutMs);
     Deferred<SetFlagResponse> d = rpc.getDeferred();
     rpc.attempt++;
@@ -335,6 +340,52 @@ public class AsyncYBClient implements AutoCloseable {
     rpc.attempt++;
     client.sendRpc(rpc);
     return d;
+  }
+
+  /**
+   * Create for a given table and stream.
+   * @param hp host port of the server.
+   * @param tableId the table id to subscribe to.
+   * @return a deferred object for the response from server.
+   */
+  public Deferred<CreateCDCStreamResponse> createCDCStream(final HostAndPort hp, String tableId) {
+    checkIsClosed();
+    TabletClient client = newSimpleClient(hp);
+    if (client == null) {
+      throw new IllegalStateException("Could not create a client to " + hp.toString());
+    }
+    CreateCDCStreamRequest rpc = new CreateCDCStreamRequest(this.masterTable, tableId);
+    rpc.setTimeoutMillis(defaultAdminOperationTimeoutMs);
+    Deferred<CreateCDCStreamResponse> d = rpc.getDeferred();
+    rpc.attempt++;
+    client.sendRpc(rpc);
+    return d;
+  }
+
+  /**
+   * Get changes for a given tablet and stream.
+   * @param hp host port of the server.
+   * @param table the table to get changes for.
+   * @param streamId the stream to get changes for.
+   * @param tabletId the tablet to get changes for.
+   * @param term the leader term to start getting changes for.
+   * @param index the log index to start get changes for.
+   * @param cb the callback to call once the RPC returns.
+   * @return a deferred object for the response from server.
+   */
+  public Deferred<Void> getChanges(
+          HostAndPort hp, YBTable table, String streamId, String tabletId, long term,
+          long index, Callback<Void, GetChangesResponse> cb) {
+    checkIsClosed();
+    TabletClient client = newSimpleClient(hp);
+    if (client == null) {
+      throw new IllegalStateException("Could not create a client to " + hp.toString());
+    }
+    GetChangesRequest rpc = new GetChangesRequest(table, streamId, tabletId, term, index);
+    rpc.setTimeoutMillis(defaultAdminOperationTimeoutMs);
+    Deferred<GetChangesResponse> d = rpc.getDeferred();
+    client.sendRpc(rpc);
+    return d.addCallback(cb);
   }
 
   /**
@@ -644,11 +695,79 @@ public class AsyncYBClient implements AutoCloseable {
     return sendRpcToTablet(rpc);
   }
 
-  public Deferred<ChangeEncryptionInfoResponse> enableEncryptionAtRest(String keyFile) {
+  /**
+   * Enable encryption at rest in memory
+   */
+  public Deferred<ChangeEncryptionInfoInMemoryResponse> enableEncryptionAtRestInMemory(
+          final String versionId) throws Exception {
     checkIsClosed();
-    ChangeEncryptionInfoRequest rpc = new ChangeEncryptionInfoRequest(this.masterTable, keyFile, true);
+    ChangeEncryptionInfoInMemoryRequest rpc = new ChangeEncryptionInfoInMemoryRequest(
+            this.masterTable, versionId, true);
     rpc.setTimeoutMillis(defaultAdminOperationTimeoutMs);
     return sendRpcToTablet(rpc);
+  }
+
+  /**
+   * Disable encryption at rest in memory
+   */
+  public Deferred<ChangeEncryptionInfoInMemoryResponse> disableEncryptionAtRestInMemory()
+          throws Exception {
+    checkIsClosed();
+    ChangeEncryptionInfoInMemoryRequest rpc = new ChangeEncryptionInfoInMemoryRequest(
+            this.masterTable, "", false);
+    rpc.setTimeoutMillis(defaultAdminOperationTimeoutMs);
+    return sendRpcToTablet(rpc);
+  }
+
+
+  public Deferred<ChangeEncryptionInfoResponse> enableEncryptionAtRest(String keyFile) {
+    checkIsClosed();
+    ChangeEncryptionInfoRequest rpc = new ChangeEncryptionInfoRequest(
+            this.masterTable, keyFile, true);
+    rpc.setTimeoutMillis(defaultAdminOperationTimeoutMs);
+    return sendRpcToTablet(rpc);
+  }
+
+  public Deferred<ChangeEncryptionInfoResponse> disableEncryptionAtRest() {
+    checkIsClosed();
+    ChangeEncryptionInfoRequest rpc = new ChangeEncryptionInfoRequest(this.masterTable, "", false);
+    rpc.setTimeoutMillis(defaultAdminOperationTimeoutMs);
+    return sendRpcToTablet(rpc);
+  }
+
+  public Deferred<IsEncryptionEnabledResponse> isEncryptionEnabled() throws Exception {
+    checkIsClosed();
+    IsEncryptionEnabledRequest rpc = new IsEncryptionEnabledRequest(this.masterTable);
+    rpc.setTimeoutMillis(defaultAdminOperationTimeoutMs);
+    return sendRpcToTablet(rpc);
+  }
+
+  public Deferred<AddUniverseKeysResponse> addUniverseKeys(
+          Map<String, byte[]> universeKeys, HostAndPort hp) throws Exception {
+    checkIsClosed();
+    TabletClient client = newSimpleClient(hp);
+    if (client == null) {
+      throw new IllegalStateException("Could not create a client to " + hp.toString());
+    }
+    AddUniverseKeysRequest rpc = new AddUniverseKeysRequest(universeKeys);
+    rpc.setTimeoutMillis(defaultAdminOperationTimeoutMs);
+    Deferred<AddUniverseKeysResponse> d = rpc.getDeferred();
+    client.sendRpc(rpc);
+    return d;
+  }
+
+  public Deferred<HasUniverseKeyInMemoryResponse> hasUniverseKeyInMemory(
+          String universeKeyId, HostAndPort hp) throws Exception {
+    checkIsClosed();
+    TabletClient client = newSimpleClient(hp);
+    if (client == null) {
+      throw new IllegalStateException("Could not create a client to " + hp.toString());
+    }
+    HasUniverseKeyInMemoryRequest rpc = new HasUniverseKeyInMemoryRequest(universeKeyId);
+    rpc.setTimeoutMillis(defaultAdminOperationTimeoutMs);
+    Deferred<HasUniverseKeyInMemoryResponse> d = rpc.getDeferred();
+    client.sendRpc(rpc);
+    return d;
   }
 
   /**
@@ -891,6 +1010,7 @@ public class AsyncYBClient implements AutoCloseable {
     }
   }
 
+// TODO(NIC): Do we need a similar pattern for IsCreateNamespaceDone?
   /**
    * This callback will be repeatedly used when opening a table until it is done being created.
    */

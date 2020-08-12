@@ -264,6 +264,8 @@ typedef struct StdRdOptions
 	AutoVacOpts autovacuum;		/* autovacuum-related options */
 	bool		user_catalog_table; /* use as an additional catalog relation */
 	int			parallel_workers;	/* max number of parallel workers */
+	bool		colocated;
+	int 	  tablegroup;
 } StdRdOptions;
 
 #define HEAP_MIN_FILLFACTOR			10
@@ -318,6 +320,15 @@ typedef struct StdRdOptions
 #define RelationGetParallelWorkers(relation, defaultpw) \
 	((relation)->rd_options ? \
 	 ((StdRdOptions *) (relation)->rd_options)->parallel_workers : (defaultpw))
+
+/*
+ * RelationGetTablegroup
+ *		Returns the relation's tablegroup reloption setting.
+ *		Note multiple eval of argument!
+ */
+#define RelationGetTablegroup(relation) \
+	((relation)->rd_options ? \
+	 ((StdRdOptions *) (relation)->rd_options)->tablegroup : 0)
 
 
 /*

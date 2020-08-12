@@ -1,20 +1,22 @@
 ---
-title: APIs
+title: API reference (for YSQL and YCQL)
+headerTitle: APIs
 linkTitle: APIs
-description: APIs
+description: YugabyteDB API reference for PostgreSQL-compatible YSQL and Cassandra-compatible YCQL
 image: /images/section_icons/index/api.png
-headcontent: YugabyteDB API reference 
+headcontent: YugabyteDB API reference
 aliases:
   - /api/
 section: REFERENCE
 menu:
   latest:
     identifier: api
-    weight: 1400
+    weight: 1100
 ---
 
 
 <div class="row">
+
  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
     <a class="section-link icon-offset" href="./ysql/">
       <div class="head">
@@ -22,10 +24,11 @@ menu:
         <div class="title">YSQL</div>
       </div>
       <div class="body">
-        Complete reference for Yugabyte Structured Query Language (YSQL) API.
+        API reference for Yugabyte Structured Query Language (YSQL).
       </div>
     </a>
   </div>
+
   <div class="col-12 col-md-6 col-lg-12 col-xl-6">
     <a class="section-link icon-offset" href="./ycql/">
       <div class="head">
@@ -33,8 +36,9 @@ menu:
         <div class="title">YCQL</div>
       </div>
       <div class="body">
-        Complete reference for Yugabyte Cloud Query Language (YCQL) API.
+        API reference for Yugabyte Cloud Query Language (YCQL).
       </div>
     </a>
-  </div> 
+  </div>
+
 </div>

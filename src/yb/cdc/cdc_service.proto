@@ -47,6 +47,10 @@ service CDCService {
   rpc ListTablets (ListTabletsRequestPB) returns (ListTabletsResponsePB);
   rpc GetChanges (GetChangesRequestPB) returns (GetChangesResponsePB);
   rpc GetCheckpoint (GetCheckpointRequestPB) returns (GetCheckpointResponsePB);
+  rpc UpdateCdcReplicatedIndex (UpdateCdcReplicatedIndexRequestPB)
+      returns (UpdateCdcReplicatedIndexResponsePB);
+  rpc BootstrapProducer (BootstrapProducerRequestPB) returns (BootstrapProducerResponsePB);
+  rpc GetLatestEntryOpId (GetLatestEntryOpIdRequestPB) returns (GetLatestEntryOpIdResponsePB);
 }
 
 message CDCErrorPB {
@@ -62,7 +66,8 @@ message CDCErrorPB {
     SUBSCRIBER_NOT_FOUND = 4;
     CHECKPOINT_TOO_OLD = 5;
     TABLET_NOT_RUNNING = 6;
-    NOT_LEADER = 7;
+    NOT_LEADER = 7; // deprecated. use TABLET_NOT_FOUND
+    LEADER_NOT_READY = 11;
     NOT_RUNNING = 8;
     INTERNAL_ERROR = 9;
     INVALID_REQUEST = 10;
@@ -123,7 +128,7 @@ message ListTabletsResponsePB {
 message CDCTabletPB {
   message ReplicaPB {
     repeated HostPortPB broadcast_addresses = 1;
-    repeated HostPortPB private_rpc_addresses = 2;
+    // Don't use private_rpc_addresses since we're cross-universe
   }
   optional bytes tablet_id = 1;
   // Tservers holding data for the tablet.
@@ -145,6 +150,9 @@ message GetChangesRequestPB {
 
   // Maximum records to read.
   optional uint32 max_records = 4;
+
+  // Whether the caller knows the tablet address or needs to use us as a proxy.
+  optional bool serve_as_proxy = 5 [default = true];
 }
 
 message KeyValuePairPB {
@@ -193,4 +201,34 @@ message GetCheckpointRequestPB {
 message GetCheckpointResponsePB {
   optional CDCErrorPB error = 1;
   optional CDCCheckpointPB checkpoint = 2;
+}
+
+message UpdateCdcReplicatedIndexRequestPB {
+  // Tablet being updated.
+  optional bytes tablet_id = 1;
+
+  // Minimum replicated index across all the streams for this tablet.
+  optional int64 replicated_index = 2;
+}
+
+message UpdateCdcReplicatedIndexResponsePB {
+  optional CDCErrorPB error = 1;
+}
+
+message BootstrapProducerRequestPB {
+  repeated string table_ids = 1;
+}
+
+message BootstrapProducerResponsePB {
+  optional CDCErrorPB error = 1;
+  repeated bytes cdc_bootstrap_ids = 2;
+}
+
+message GetLatestEntryOpIdRequestPB {
+  optional bytes tablet_id = 1;
+}
+
+message GetLatestEntryOpIdResponsePB {
+  optional CDCErrorPB error = 1;
+  optional OpIdPB op_id = 2;
 }

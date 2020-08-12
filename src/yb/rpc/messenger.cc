@@ -58,6 +58,7 @@
 #include "yb/rpc/rpc_header.pb.h"
 #include "yb/rpc/rpc_metrics.h"
 #include "yb/rpc/rpc_service.h"
+#include "yb/rpc/rpc_util.h"
 #include "yb/rpc/tcp_stream.h"
 #include "yb/rpc/yb_rpc.h"
 
@@ -66,6 +67,7 @@
 #include "yb/util/logging.h"
 #include "yb/util/metrics.h"
 #include "yb/util/monotime.h"
+#include "yb/util/net/dns_resolver.h"
 #include "yb/util/net/socket.h"
 #include "yb/util/scope_exit.h"
 #include "yb/util/size_literals.h"
@@ -92,7 +94,7 @@ DEFINE_uint64(io_thread_pool_size, 4, "Size of allocated IO Thread Pool.");
 DEFINE_int64(outbound_rpc_memory_limit, 0, "Outbound RPC memory limit");
 
 DEFINE_int32(rpc_queue_limit, 10000, "Queue limit for rpc server");
-DEFINE_int32(rpc_workers_limit, 256, "Workers limit for rpc server");
+DEFINE_int32(rpc_workers_limit, 1024, "Workers limit for rpc server");
 
 DEFINE_int32(socket_receive_buffer_size, 0, "Socket receive buffer size, 0 to use default");
 
@@ -558,6 +560,7 @@ Messenger::Messenger(const MessengerBuilder &bld)
       io_thread_pool_(name_, FLAGS_io_thread_pool_size),
       scheduler_(&io_thread_pool_.io_service()),
       normal_thread_pool_(new rpc::ThreadPool(name_, bld.queue_limit_, bld.workers_limit_)),
+      resolver_(new DnsResolver(&io_thread_pool_.io_service())),
       rpc_metrics_(new RpcMetrics(bld.metric_entity_)),
       num_connections_to_server_(bld.num_connections_to_server_) {
 #ifndef NDEBUG
@@ -567,6 +570,8 @@ Messenger::Messenger(const MessengerBuilder &bld)
   for (int i = 0; i < bld.num_reactors_; i++) {
     reactors_.emplace_back(std::make_unique<Reactor>(this, i, bld));
   }
+  // Make sure skip buffer is allocated before we hit memory limit and try to use it.
+  GetGlobalSkipBuffer();
 }
 
 Messenger::~Messenger() {

@@ -45,12 +45,12 @@ import org.yb.minicluster.MiniYBCluster;
 import org.yb.minicluster.MiniYBDaemon;
 import org.yb.util.ServerInfo;
 
+import static org.yb.AssertionWrappers.*;
+
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.util.Map;
 import java.util.Scanner;
-
-import static junit.framework.TestCase.*;
 
 @RunWith(value= YBTestRunner.class)
 public class TestHealthChecks extends BaseYBClientTest {
@@ -81,6 +81,10 @@ public class TestHealthChecks extends BaseYBClientTest {
   }
 
   private JsonElement getHealthValue(String key) throws Exception {
+    return getHealthValue(key, 0);
+  }
+
+  private JsonElement getHealthValue(String key, int tserver_death_interval_msecs) throws Exception {
     try {
       // get connection info for master web port
       HostAndPort masterHostAndPort = syncClient.getLeaderMasterHostAndPort();
@@ -91,8 +95,9 @@ public class TestHealthChecks extends BaseYBClientTest {
       int masterLeaderWebPort = masters.get(masterHostAndPort).getWebPort();
 
       // call the health-check JSON endpoint
-      URL url = new URL(String.format("http://%s:%d/api/v1/health-check",
-            masterHostAndPort.getHostText(), masterLeaderWebPort));
+      URL url =
+        new URL(String.format("http://%s:%d/api/v1/health-check?tserver_death_interval_msecs=%d",
+                masterHostAndPort.getHostText(), masterLeaderWebPort, tserver_death_interval_msecs));
       Scanner scanner = new Scanner(url.openConnection().getInputStream());
       JsonParser parser = new JsonParser();
       JsonElement tree = parser.parse(scanner.useDelimiter("\\A").next());
@@ -121,11 +126,14 @@ public class TestHealthChecks extends BaseYBClientTest {
 
     // verify all servers have stayed up for at least one heartbeat
     Thread.sleep(MiniYBCluster.TSERVER_HEARTBEAT_TIMEOUT_MS + 1000);
-    assertTrue (getHealthValue("most_recent_uptime").getAsInt() >= HEARTBEAT_SEC);
+    assertGreaterThanOrEqualTo(getHealthValue("most_recent_uptime").getAsInt(), HEARTBEAT_SEC);
 
     // kill (don't stop) a TServer.
     JsonArray deadNodes = getHealthValue("dead_nodes").getAsJsonArray();
     assertEquals(deadNodes.size(), 0);
+    JsonArray underReplicatedTablets = getHealthValue("under_replicated_tablets").getAsJsonArray();
+    assertEquals(underReplicatedTablets.size(), 0);
+
     ListTabletServersResponse tsList = syncClient.listTabletServers();
     ServerInfo tServer = tsList.getTabletServersList().get(tsList.getTabletServersCount()-1);
     miniCluster.killTabletServerOnHostPort(
@@ -136,12 +144,26 @@ public class TestHealthChecks extends BaseYBClientTest {
     deadNodes = getHealthValue("dead_nodes").getAsJsonArray();
     assertEquals(deadNodes.size(), 1);
     LOG.info("Dead Nodes: " + deadNodes.get(0) + " && " + tServer.getUuid());
+
+    // With the default value of tserver_death_interval_msecs as 0, we should get some tablets that
+    // are under replicated in this call.
+    underReplicatedTablets = getHealthValue("under_replicated_tablets").getAsJsonArray();
+    assertTrue(underReplicatedTablets.size() > 0);
+
+    // With a higher value of tserver_death_interval_msecs, we should not get any tablets that are
+    // listed as under-replicated.
+    underReplicatedTablets = getHealthValue("under_replicated_tablets", 100000).getAsJsonArray();
+    assertEquals(underReplicatedTablets.size(), 0);
+
     // BUG: 'dead_nodes' lists WebPort, we're using RpcPort
     assertEquals(deadNodes.get(0).getAsString(), tServer.getUuid());
-    assertTrue (getHealthValue("most_recent_uptime").getAsInt() >= 3 * HEARTBEAT_SEC );
+    assertGreaterThanOrEqualTo(
+        getHealthValue("most_recent_uptime").getAsInt(), 3 * HEARTBEAT_SEC);
 
     // start a new TServer, ensure that the most_recent_uptime just decreased.
     addNewTServers(1);
-    assertTrue (getHealthValue("most_recent_uptime").getAsInt() <= HEARTBEAT_SEC);
+    TestUtils.waitFor(() -> {
+      return getHealthValue("most_recent_uptime").getAsInt() < 3 * HEARTBEAT_SEC;
+    }, HEARTBEAT_SEC * 3);
   }
 }

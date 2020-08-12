@@ -22,14 +22,8 @@ Explore how you can use Prisma, and its GraphQL support, to interact with Yugaby
 If YugabyteDB is installed, run the following `yb-ctl create` command to start a YugabyteDB 1-node cluster, setting the default transaction isolation level to `serializable`:
 
 ```sh
-./bin/yb-ctl create --tserver_flags='ysql_pg_conf="default_transaction_isolation=serializable"'
+./bin/yb-ctl create --tserver_flags=ysql_pg_conf="default_transaction_isolation=serializable"
 ```
-
-{{< note title="Note" >}}
-
-Setting the transaction isolation level to `serializable` is a temporary limitation due to a YugabyteDB issue involving the locking of foreign keys ([GitHub issue #1199](https://github.com/yugabyte/yugabyte-db/issues/1199))
-
-{{< /note >}}
 
 If you are new to YugabyteDB, you can be up and running with YugabyteDB in under five minutes by following the steps in [Quick start](https://docs.yugabyte.com/latest/quick-start/). After installing YugabyteDB, make sure to follow the step mentioned above.
 
@@ -42,7 +36,7 @@ To use Prisma, `npm` and Docker need to be installed. For details on installing 
 
 To install the Prisma CLI using `npm`, run the following command:
 
-```
+```sh
 npm i -g prisma
 ```
 
@@ -56,7 +50,7 @@ To set up a Prisma project, named `prisma-yb`, run the following command.
 prisma init prisma-yb
 ```
 
-In order to quickly explore using Prisma with YugabyteDB, we will use the default database and user in the PostgreSQL-compatible YugabyteDB.
+In order to quickly explore using Prisma with YugabyteDB, you will use the default database and user in the PostgreSQL-compatible YugabyteDB.
 
 When prompted, enter or select the following values:
 
@@ -65,9 +59,9 @@ When prompted, enter or select the following values:
 - Does your database contain existing data? **No**
 - Enter database host: **localhost**
 - Enter database port: **5433**
-- Enter database user: **postgres**
+- Enter database user: **yugabyte**
 - Enter database password: [No password, just press **Enter**]
-- Enter database name (the database includes the schema) **postgres**
+- Enter database name (the database includes the schema) **yugabyte**
 - Use SSL? **N**
 - Select the programming language for the generated Prisma client: **Prisma JavaScript Client**
 
@@ -155,8 +149,6 @@ mutation {
   }
 }
 ```
-
-![Create user Jane with three postings](/images/develop/graphql/prisma/create-user-jane.png)
 
 2. Create a user John with two postings.
 
@@ -278,7 +270,7 @@ touch index.js
 ```js
 const { prisma } = require('./generated/prisma-client')
 
-// A `main` function so that we can use async/await
+// A `main` function so that you can use async/await
 async function main() {
 
   // Create a new user called `Alice`

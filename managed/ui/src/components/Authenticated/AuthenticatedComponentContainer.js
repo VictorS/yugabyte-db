@@ -2,8 +2,6 @@
 
 import { connect } from 'react-redux';
 import AuthenticatedComponent from './AuthenticatedComponent';
-import { fetchHostInfo, fetchHostInfoSuccess,
-  fetchHostInfoFailure } from '../../actions/customers';
 import { fetchUniverseList, fetchUniverseListResponse, resetUniverseList }
   from '../../actions/universe';
 import { getProviderList, getProviderListResponse, getSupportedRegionData,
@@ -16,23 +14,13 @@ import { fetchSoftwareVersions, fetchSoftwareVersionsSuccess,
   fetchSoftwareVersionsFailure, fetchYugaWareVersion, fetchYugaWareVersionResponse,
   fetchCustomerConfigs, fetchCustomerConfigsResponse, getTlsCertificates,
   getTlsCertificatesResponse, insecureLogin, insecureLoginResponse }
-  from 'actions/customers';
+  from '../../actions/customers';
 import {fetchCustomerTasks, fetchCustomerTasksSuccess, fetchCustomerTasksFailure} from '../../actions/tasks';
 import {setUniverseMetrics} from '../../actions/universe';
 import { queryMetrics } from '../../actions/graph';
 
 const mapDispatchToProps = (dispatch) => {
   return {
-    fetchHostInfo: () => {
-      dispatch(fetchHostInfo()).then((response)=>{
-        if (response.payload.status !== 200) {
-          dispatch(fetchHostInfoFailure(response.payload));
-        } else {
-          dispatch(fetchHostInfoSuccess(response.payload));
-        }
-      });
-    },
-
     fetchSoftwareVersions: () => {
       dispatch(fetchSoftwareVersions()).then((response)=>{
         if (response.payload.status !== 200) {
@@ -120,11 +108,11 @@ const mapDispatchToProps = (dispatch) => {
     },
 
     fetchCustomerTasks: () => {
-      dispatch(fetchCustomerTasks()).then((response) => {
+      return dispatch(fetchCustomerTasks()).then((response) => {
         if (!response.error) {
-          dispatch(fetchCustomerTasksSuccess(response.payload));
+          return dispatch(fetchCustomerTasksSuccess(response.payload));
         } else {
-          dispatch(fetchCustomerTasksFailure(response.payload));
+          return dispatch(fetchCustomerTasksFailure(response.payload));
         }
       });
     },
@@ -148,7 +136,7 @@ const mapDispatchToProps = (dispatch) => {
 const mapStateToProps = (state) => {
   return {
     cloud: state.cloud,
-    customer: state.customer,
+    currentCustomer: state.customer.currentCustomer,
     universe: state.universe,
     tasks: state.tasks,
     fetchMetadata: state.cloud.fetchMetadata,

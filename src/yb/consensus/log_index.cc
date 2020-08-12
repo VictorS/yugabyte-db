@@ -118,6 +118,9 @@ class LogIndex::IndexChunk : public RefCountedThreadSafe<LogIndex::IndexChunk> {
   void GetEntry(int entry_index, PhysicalEntry* ret);
   void SetEntry(int entry_index, const PhysicalEntry& entry);
 
+  // Flush memory-mapped chunk to file.
+  Status Flush();
+
  private:
   const string path_;
   int fd_;
@@ -177,6 +180,14 @@ void LogIndex::IndexChunk::SetEntry(int entry_index, const PhysicalEntry& phys) 
   memcpy(mapping_ + sizeof(PhysicalEntry) * entry_index, &phys, sizeof(PhysicalEntry));
 }
 
+Status LogIndex::IndexChunk::Flush() {
+  if (mapping_ != nullptr) {
+    auto result = msync(mapping_, kChunkFileSize, MS_SYNC);
+    return CheckError(result, "msync");
+  }
+  return Status::OK();
+}
+
 ////////////////////////////////////////////////////////////
 // LogIndex
 ////////////////////////////////////////////////////////////
@@ -234,13 +245,13 @@ Status LogIndex::GetChunkForIndex(int64_t log_index, bool create,
 
 Status LogIndex::AddEntry(const LogIndexEntry& entry) {
   scoped_refptr<IndexChunk> chunk;
-  RETURN_NOT_OK(GetChunkForIndex(entry.op_id.index(),
+  RETURN_NOT_OK(GetChunkForIndex(entry.op_id.index,
                                  true /* create if not found */,
                                  &chunk));
-  int index_in_chunk = entry.op_id.index() % kEntriesPerIndexChunk;
+  int index_in_chunk = entry.op_id.index % kEntriesPerIndexChunk;
 
   PhysicalEntry phys;
-  phys.term = entry.op_id.term();
+  phys.term = entry.op_id.term;
   phys.segment_sequence_number = entry.segment_sequence_number;
   phys.offset_in_segment = entry.offset_in_segment;
 
@@ -263,7 +274,7 @@ Status LogIndex::GetEntry(int64_t index, LogIndexEntry* entry) {
     return STATUS(NotFound, "entry not found");
   }
 
-  entry->op_id = consensus::MakeOpId(phys.term, index);
+  entry->op_id = yb::OpId(phys.term, index);
   entry->segment_sequence_number = phys.segment_sequence_number;
   entry->offset_in_segment = phys.offset_in_segment;
 
@@ -299,9 +310,27 @@ void LogIndex::GC(int64_t min_index_to_retain) {
   }
 }
 
+Status LogIndex::Flush() {
+  std::vector<scoped_refptr<IndexChunk>> chunks_to_flush;
+
+  {
+    std::lock_guard<simple_spinlock> l(open_chunks_lock_);
+    chunks_to_flush.reserve(open_chunks_.size());
+    for (auto& it : open_chunks_) {
+      chunks_to_flush.push_back(it.second);
+    }
+  }
+
+  for (auto& chunk : chunks_to_flush) {
+    RETURN_NOT_OK(chunk->Flush());
+  }
+
+  return Status::OK();
+}
+
 string LogIndexEntry::ToString() const {
   return Substitute("op_id=$0.$1 segment_sequence_number=$2 offset=$3",
-                    op_id.term(), op_id.index(),
+                    op_id.term, op_id.index,
                     segment_sequence_number,
                     offset_in_segment);
 }

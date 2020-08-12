@@ -24,9 +24,17 @@ libraryDependencies ++= Seq(
   "org.yaml" % "snakeyaml" % "1.17",
   "org.bouncycastle" % "bcpkix-jdk15on" % "1.61",
   "org.springframework.security" % "spring-security-core" % "5.1.6.RELEASE",
-  "com.amazonaws" % "aws-java-sdk-kms" % "1.11.638"
-
-
+  "com.amazonaws" % "aws-java-sdk-kms" % "1.11.638",
+  "com.amazonaws" % "aws-java-sdk-iam" % "1.11.670",
+  "com.amazonaws" % "aws-java-sdk-sts" % "1.11.678",
+  "com.cronutils" % "cron-utils" % "9.0.1",
+  "io.prometheus" % "simpleclient" % "0.8.0",
+  "io.prometheus" % "simpleclient_hotspot" % "0.8.0",
+  "io.prometheus" % "simpleclient_servlet" % "0.8.0",
+  "org.glassfish.jaxb" % "jaxb-runtime" % "2.3.2",
+  "org.pac4j" % "play-pac4j" % "3.1.0",
+  "org.pac4j" % "pac4j-oauth" % "2.2.0" exclude("commons-io" , "commons-io"),
+  "org.pac4j" % "pac4j-oidc" % "2.2.0" exclude("commons-io" , "commons-io")
 )
 // Default to true if nothing passed on the env, so we can pick up YB jars from local java itest.
 lazy val mavenLocal = Option(System.getenv("USE_MAVEN_LOCAL")).getOrElse("false")
@@ -43,12 +51,13 @@ resolvers += {
   }
 }
 
-lazy val groupId = Option(System.getenv("YB_TMP_GROUP_ID")).getOrElse("org.yb")
+lazy val groupId = "org.yb"
 libraryDependencies += groupId % "yb-client" % "0.8.0-SNAPSHOT"
 
 
 dependencyOverrides += "io.netty" % "netty-handler" % "4.0.36.Final"
 dependencyOverrides += "com.google.protobuf" % "protobuf-java" % "latest.integration"
+dependencyOverrides += "com.google.guava" % "guava" % "16.0.1"
 
 javaOptions in Test += "-Dconfig.file=src/main/resources/application.test.conf"
 testOptions += Tests.Argument(TestFrameworks.JUnit, "-v", "-q", "-a")

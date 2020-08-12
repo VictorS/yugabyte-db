@@ -24,10 +24,12 @@ from datetime import datetime
 from dateutil import tz
 from multiprocessing import Pool
 
-YB_TSERVER_DIR = "/home/yugabyte/tserver/"
-YB_CORES_DIR = "/home/yugabyte/cores/"
-YB_PROCESS_LOG_PATH_FORMAT = "/home/yugabyte/{}/logs/"
-VM_CERT_FILE_PATH = "/home/yugabyte/yugabyte-tls-config/ca.crt"
+# Try to read home dir from environment variable, else assume it's /home/yugabyte.
+YB_HOME_DIR = os.environ.get("YB_HOME_DIR", "/home/yugabyte")
+YB_TSERVER_DIR = os.path.join(YB_HOME_DIR, "tserver")
+YB_CORES_DIR = os.path.join(YB_HOME_DIR, "cores/")
+YB_PROCESS_LOG_PATH_FORMAT = os.path.join(YB_HOME_DIR, "{}/logs/")
+VM_CERT_FILE_PATH = os.path.join(YB_HOME_DIR, "yugabyte-tls-config/ca.crt")
 K8S_CERT_FILE_PATH = "/opt/certs/yugabyte/ca.crt"
 
 RECENT_FAILURE_THRESHOLD_SEC = 8 * 60
@@ -39,24 +41,28 @@ MAX_CONCURRENT_PROCESSES = 10
 MAX_TRIES = 2
 
 # This hardcoded as the ses:FromAddress in the IAM policy.
-EMAIL_SERVER = "email-smtp.us-west-2.amazonaws.com"
-EMAIL_PORT = 465
+EMAIL_SERVER = os.environ.get("SMTP_SERVER", "email-smtp.us-west-2.amazonaws.com")
+EMAIL_PORT = os.environ.get("SMTP_PORT", None)
 # These need to be setup as env vars from YW or in the env if running manually. If not specified
 # then sending the email will fail, but reporting the status will still work just fine.
 EMAIL_FROM = os.environ.get("YB_ALERTS_EMAIL")
-EMAIL_USERNAME = os.environ.get("YB_ALERTS_USERNAME")
-EMAIL_PASSWORD = os.environ.get("YB_ALERTS_PASSWORD")
-
+EMAIL_USERNAME = os.environ.get("YB_ALERTS_USERNAME", None)
+EMAIL_PASSWORD = os.environ.get("YB_ALERTS_PASSWORD", None)
+SMTP_USE_SSL = os.environ.get("SMTP_USE_SSL", "true")
+SMTP_USE_TLS = os.environ.get("SMTP_USE_TLS", "false")
 
 ###################################################################################################
 # Reporting
 ###################################################################################################
+
+
 def generate_ts():
     return local_time().strftime('%Y-%m-%d %H:%M:%S')
 
 
 class EntryType:
     NODE = "node"
+    NODE_NAME = "node_name"
     TIMESTAMP = "timestamp"
     MESSAGE = "message"
     DETAILS = "details"
@@ -65,10 +71,11 @@ class EntryType:
 
 
 class Entry:
-    def __init__(self, message, node, process=None):
+    def __init__(self, message, node, process=None, node_name=None):
         self.timestamp = generate_ts()
         self.message = message
         self.node = node
+        self.node_name = node_name
         self.process = process
         # To be filled in.
         self.details = None
@@ -82,6 +89,7 @@ class Entry:
     def as_json(self):
         j = {
             EntryType.NODE: self.node,
+            EntryType.NODE_NAME: self.node_name or "",
             EntryType.TIMESTAMP: self.timestamp,
             EntryType.MESSAGE: self.message,
             EntryType.DETAILS: self.details,
@@ -94,6 +102,7 @@ class Entry:
 
 class Report:
     def __init__(self, yb_version):
+        self.mail_error = None
         self.entries = []
         self.start_ts = generate_ts()
         self.yb_version = yb_version
@@ -118,14 +127,19 @@ class Report:
         file.write(str(self))
         file.close()
 
-    def __str__(self):
+    def as_json(self, only_errors=False):
         j = {
             "timestamp": self.start_ts,
             "yb_version": self.yb_version,
-            "data": [e.as_json() for e in self.entries],
+            "data": [e.as_json() for e in self.entries if not only_errors or e.has_error],
             "has_error": True in [e.has_error for e in self.entries]
         }
+        if self.mail_error is not None:
+            j["mail_error"] = self.mail_error
         return json.dumps(j, indent=2)
+
+    def __str__(self):
+        return self.as_json()
 
 
 ###################################################################################################
@@ -152,14 +166,18 @@ class KubernetesDetails():
     def __init__(self, node_fqdn, config_map):
         self.namespace = node_fqdn.split('.')[2]
         self.pod_name = node_fqdn.split('.')[0]
+        # The pod names are yb-master-n/yb-tserver-n where n is the pod number
+        # and yb-master/yb-tserver are the container names.
+        self.container = self.pod_name.rsplit('-', 1)[0]
         self.config = config_map[self.namespace]
 
 
 class NodeChecker():
 
-    def __init__(self, node, identity_file, ssh_port, start_time_ms,
+    def __init__(self, node, node_name, identity_file, ssh_port, start_time_ms,
                  namespace_to_config, ysql_port, enable_tls_client):
         self.node = node
+        self.node_name = node_name
         self.identity_file = identity_file
         self.ssh_port = ssh_port
         self.start_time_ms = start_time_ms
@@ -176,7 +194,7 @@ class NodeChecker():
         self.ysql_port = ysql_port
 
     def _new_entry(self, message, process=None):
-        return Entry(message, self.node, process)
+        return Entry(message, self.node, process, self.node_name)
 
     def _remote_check_output(self, command):
         cmd_to_run = []
@@ -190,6 +208,8 @@ class NodeChecker():
                 '-t',
                 '-n={}'.format(self.k8s_details.namespace),
                 self.k8s_details.pod_name,
+                '-c',
+                self.k8s_details.container,
                 '--',
                 'bash',
                 '-c',
@@ -246,7 +266,7 @@ class NodeChecker():
         remote_cmd = (
             'find {} {} -name "*FATAL*" -type f -printf "%T@ %p\\n" | sort -rn'.format(
                 search_dir,
-                '-cmin -{}'.format(FATAL_TIME_THRESHOLD_MINUTES)))
+                '-mmin -{}'.format(FATAL_TIME_THRESHOLD_MINUTES)))
         output = self._remote_check_output(remote_cmd)
         if has_errors(output):
             return e.fill_and_return_entry([output], True)
@@ -273,7 +293,7 @@ class NodeChecker():
         e = self._new_entry("Core files")
         remote_cmd = 'if [ -d {} ]; then find {} {} -name "core_*"; fi'.format(
             YB_CORES_DIR, YB_CORES_DIR,
-            '-cmin -{}'.format(FATAL_TIME_THRESHOLD_MINUTES))
+            '-mmin -{}'.format(FATAL_TIME_THRESHOLD_MINUTES))
         output = self._remote_check_output(remote_cmd)
         if has_errors(output):
             return e.fill_and_return_entry([output], True)
@@ -374,17 +394,24 @@ class NodeChecker():
 
         return e.fill_and_return_entry(errors, len(errors) > 0)
 
-    def check_psql(self):
-        logging.info("Checking psql works for node {}".format(self.node))
-        e = self._new_entry("Connectivity with psql")
+    def check_ysqlsh(self):
+        logging.info("Checking ysqlsh works for node {}".format(self.node))
+        e = self._new_entry("Connectivity with ysqlsh")
 
-        psql = '{}/bin/psql'.format(YB_TSERVER_DIR)
-        remote_cmd = r'echo "\conninfo" | {} -h {} -p {} -U postgres'.format(
-            psql, self.node, self.ysql_port)
+        ysqlsh = '{}/bin/ysqlsh'.format(YB_TSERVER_DIR)
+        if not self.enable_tls_client:
+            user = "postgres"
+            remote_cmd = r'echo "\conninfo" | {} -h {} -p {} -U {}'.format(
+                ysqlsh, self.node, self.ysql_port, user)
+        else:
+            user = "yugabyte"
+            remote_cmd = r'echo "\conninfo" | {} -h {} -p {} -U {} {}'.format(
+                ysqlsh, self.node, self.ysql_port, user, '"sslmode=require"')
 
         errors = []
         output = self._remote_check_output(remote_cmd).strip()
-        if not (output.startswith('You are connected to database "postgres"')):
+        if not (output.startswith('You are connected to database "{}"'.format(user)) or
+                "Password for user {}:".format(user)):
             errors = [output]
         return e.fill_and_return_entry(errors, len(errors) > 0)
 
@@ -445,7 +472,7 @@ def assemble_mail_row(data, is_first_check, timestamp):
         td_element('0', '', details_content))
 
 
-def send_mail(report, subject, destination, nodes, universe_name):
+def send_mail(report, subject, destination, nodes, universe_name, report_only_errors):
     logging.info("Sending email: '{}' to '{}'".format(subject, destination))
     style_font = "font-family: SF Pro Display, SF Pro, Helvetica Neue, Helvetica, sans-serif;"
     json_object = json.loads(str(report))
@@ -459,16 +486,23 @@ def send_mail(report, subject, destination, nodes, universe_name):
         node_has_error = False
         is_first_check = True
         node_content_data = []
+        node_name = ''
         for node_check_data_row in json_object["data"]:
             if node == node_check_data_row["node"]:
                 if node_check_data_row["has_error"]:
                     node_has_error = True
+                elif report_only_errors:
+                    continue
+                node_name = node_check_data_row["node_name"]
                 node_content_data.append(assemble_mail_row(
                     node_check_data_row,
                     is_first_check,
                     json_object["timestamp"])
                 )
                 is_first_check = False
+
+        if report_only_errors and not node_has_error:
+            continue
 
         node_header_style_colors_color = '#ffffff;' if node_has_error else '#289b42;'
         node_header_style_colors_back = '#E8473F;' if node_has_error else '#ffffff'
@@ -493,7 +527,8 @@ def send_mail(report, subject, destination, nodes, universe_name):
             {}
             border-radius:4px;
             padding:2px 6px;"'''.format(node_header_style_colors)
-        node_header_title = str(node)+'<span {}>{}</span>'.format(badge_style, badge_caption)
+        node_header_title = str(node_name) + '<br>' + str(node) + \
+            '<span {}>{}</span>'.format(badge_style, badge_caption)
         h2_style = '''font-weight:700;
             line-height:1em;
             color:#202951;
@@ -518,6 +553,8 @@ def send_mail(report, subject, destination, nodes, universe_name):
             table_container_style,
             table_container(''.join(node_content_data))))
 
+    if not email_content_data:
+        email_content_data = "<b>No errors to report.</b>"
     sender = EMAIL_FROM
     msg = MIMEMultipart('alternative')
     msg['Subject'] = subject
@@ -553,11 +590,27 @@ def send_mail(report, subject, destination, nodes, universe_name):
         version=make_header_left("Universe version", report.yb_version))
     body = '<html><body><pre style="{}">{}\n{} {}</pre></body></html>\n'.format(
         style, header, ''.join(email_content_data), timestamp)
+
+    msg.attach(MIMEText(report.as_json(report_only_errors), 'plain'))
+    # the last part of a multipart MIME message is the preferred part
     msg.attach(MIMEText(body, 'html'))
 
-    s = smtplib.SMTP_SSL(EMAIL_SERVER, EMAIL_PORT)
+    if SMTP_USE_SSL.lower() == 'true':
+        if EMAIL_PORT is not None:
+            s = smtplib.SMTP_SSL(EMAIL_SERVER, int(EMAIL_PORT))
+        else:
+            # Port defaults to 465
+            s = smtplib.SMTP_SSL(EMAIL_SERVER)
+    else:
+        if EMAIL_PORT is not None:
+            s = smtplib.SMTP(EMAIL_SERVER, int(EMAIL_PORT))
+        else:
+            s = smtplib.SMTP(EMAIL_SERVER)
+        if SMTP_USE_TLS.lower() == 'true':
+            s.starttls()
     s.ehlo()
-    s.login(EMAIL_USERNAME, EMAIL_PASSWORD)
+    if EMAIL_USERNAME is not None and EMAIL_PASSWORD is not None:
+        s.login(EMAIL_USERNAME, EMAIL_PASSWORD)
     dest_list = destination.split(',')
     s.sendmail(sender, dest_list, msg.as_string())
     s.quit()
@@ -662,8 +715,6 @@ def main():
     parser = argparse.ArgumentParser(prog=sys.argv[0])
     parser.add_argument('--cluster_payload', type=str, default=None, required=True,
                         help='JSON serialized payload of cluster data: IPs, pem files, etc.')
-    parser.add_argument('--ssh_port', type=str, default='22',
-                        help='SSH server port number')
     parser.add_argument('--universe_name', type=str, default=None, required=True,
                         help='Universe name to use in the email report')
     parser.add_argument('--customer_tag', type=str, default=None,
@@ -673,26 +724,29 @@ def main():
     parser.add_argument('--log_file', type=str, default=None, required=False,
                         help='Log file to which the report will be written to')
     parser.add_argument('--send_status', action="store_true",
-                        help='Send email with status update even if no errors')
+                        help='Send email even if no errors')
     parser.add_argument('--start_time_ms', type=int, required=False, default=None,
                         help='Potential start time of the universe, to prevent uptime confusion.')
     parser.add_argument('--retry_interval_secs', type=int, required=False, default=30,
                         help='Time to wait between retries of failed checks')
+    parser.add_argument('--report_only_errors', action="store_true",
+                        help='Only report nodes with errors')
     args = parser.parse_args()
     universe = UniverseDefinition(args.cluster_payload)
     # Technically, each cluster can have its own version, but in practice, we disallow that in YW.
     universe_version = universe.clusters[0].yb_version if universe.clusters else None
     report = Report(universe_version)
     coordinator = CheckCoordinator(args.retry_interval_secs)
-    summary_nodes = []
+    summary_nodes = {}
     for c in universe.clusters:
         master_nodes = c.master_nodes
         tserver_nodes = c.tserver_nodes
-        all_nodes = set(master_nodes + tserver_nodes)
-        summary_nodes += all_nodes
-        for node in all_nodes:
+        all_nodes = dict(master_nodes)
+        all_nodes.update(dict(tserver_nodes))
+        summary_nodes.update(dict(all_nodes))
+        for (node, node_name) in all_nodes.items():
             checker = NodeChecker(
-                    node, c.identity_file, c.ssh_port,
+                    node, node_name, c.identity_file, c.ssh_port,
                     args.start_time_ms, c.namespace_to_config, c.ysql_port,
                     c.enable_tls_client)
             # TODO: use paramiko to establish ssh connection to the nodes.
@@ -708,8 +762,8 @@ def main():
                 coordinator.add_check(checker, "check_cqlsh")
                 coordinator.add_check(checker, "check_redis_cli")
                 # TODO: Enable check after addressing issue #1845.
-                if c.enable_ysql and not c.enable_tls_client:
-                    coordinator.add_check(checker, "check_psql")
+                if c.enable_ysql:
+                    coordinator.add_check(checker, "check_ysqlsh")
             coordinator.add_check(checker, "check_disk_utilization")
             coordinator.add_check(checker, "check_for_core_files")
             coordinator.add_check(checker, "check_file_descriptors")
@@ -725,9 +779,13 @@ def main():
     # NOTE: We only send emails if we are provided a destination, which can be a CSV of addresses.
     if args.destination and (args.send_status or report.has_errors()):
         try:
-            send_mail(report, subject, args.destination, summary_nodes, args.universe_name)
+            send_mail(
+                report, subject, args.destination, summary_nodes.keys(),
+                args.universe_name, args.report_only_errors
+            )
         except Exception as e:
             logging.error("Sending email failed with: {}".format(str(e)))
+            report.mail_error = str(e)
     report.write_to_log(args.log_file)
 
     # Write to stdout to be caught by YW subprocess.

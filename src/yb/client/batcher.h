@@ -166,6 +166,10 @@ class Batcher : public RefCountedThreadSafe<Batcher> {
     force_consistent_read_ = value;
   }
 
+  void SetHybridTimeForWrite(const HybridTime ht) {
+    hybrid_time_for_write_ = ht;
+  }
+
   YBTransactionPtr transaction() const;
 
   const TransactionMetadata& transaction_metadata() const {
@@ -184,9 +188,13 @@ class Batcher : public RefCountedThreadSafe<Batcher> {
       const TabletId& tablet_id);
   void RequestFinished(const TabletId& tablet_id, RetryableRequestId request_id);
 
-  void SetMemoryLimitScore(double score) {
-    memory_limit_score_ = score;
+  void SetRejectionScoreSource(RejectionScoreSourcePtr rejection_score_source) {
+    rejection_score_source_ = rejection_score_source;
   }
+
+  double RejectionScore(int attempt_num);
+
+  std::string LogPrefix() const;
 
   // This is a status error string used when there are multiple errors that need to be fetched
   // from the error collector.
@@ -208,17 +216,17 @@ class Batcher : public RefCountedThreadSafe<Batcher> {
 
   // Return true if the batch has been aborted, and any in-flight ops should stop
   // processing wherever they are.
-  bool IsAbortedUnlocked() const EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  bool IsAbortedUnlocked() const REQUIRES(mutex_);
 
   // Combines new error to existing ones. I.e. updates combined error with new status.
   void CombineErrorUnlocked(const InFlightOpPtr& in_flight_op, const Status& status)
-      EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+      REQUIRES(mutex_);
 
   // Remove an op from the in-flight op list, and delete the op itself.
   // The operation is reported to the ErrorReporter as having failed with the
   // given status.
   void MarkInFlightOpFailedUnlocked(const InFlightOpPtr& in_flight_op, const Status& s)
-      EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+      REQUIRES(mutex_);
 
   void CheckForFinishedFlush();
   void FlushBuffersIfReady();
@@ -248,6 +256,9 @@ class Batcher : public RefCountedThreadSafe<Batcher> {
   CoarseTimePoint ComputeDeadlineUnlocked() const;
 
   void TransactionReady(const Status& status, const BatcherPtr& self);
+
+  // initial - whether this method is called first time for this batch.
+  void ExecuteOperations(Initial initial);
 
   // See note about lock ordering in batcher.cc
   mutable simple_spinlock mutex_;
@@ -304,10 +315,13 @@ class Batcher : public RefCountedThreadSafe<Batcher> {
   // The consistent read point for this batch if it is specified.
   ConsistentReadPoint* read_point_ = nullptr;
 
+  // Used for backfilling at a historic timestamp.
+  HybridTime hybrid_time_for_write_ = HybridTime::kInvalid;
+
   // Force consistent read on transactional table, even we have only single shard commands.
   ForceConsistentRead force_consistent_read_;
 
-  double memory_limit_score_ = 0.0;
+  RejectionScoreSourcePtr rejection_score_source_;
 
   DISALLOW_COPY_AND_ASSIGN(Batcher);
 };

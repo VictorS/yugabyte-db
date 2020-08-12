@@ -7,6 +7,7 @@ canonifyurls: false
 googleAnalytics: UA-104956980-3
 pygmentsCodefences: true
 pygmentsStyle: "pygments"
+enableGitInfo: true
 
 
 params:
@@ -25,7 +26,7 @@ params:
     primary: orange
     accent: amber
   font:
-    text: Open Sans
+    text: Inter
     code: Inconsolata
   algolia:
     index: docs
@@ -38,9 +39,16 @@ menu:
   main:
     - name: Introduction
       identifier: intro
-blackfriday:
-  smartypants: true
-  fractions: true
-  smartDashes: true
-  plainIDAnchors: true
+markup:
+  goldmark:
+    extensions:
+      typographer: false
+    parser:
+      autoHeadingIDType: blackfriday
+    renderer:
+      unsafe: true
+  tableOfContents:
+    startLevel: 2
+    endLevel: 3
+    ordered: false
 ---

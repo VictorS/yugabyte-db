@@ -93,12 +93,13 @@ ADD_YB_LIBRARY(pgsql_protocol_proto
                NONLINK_DEPS ${PGSQL_PROTOCOL_PROTO_TGTS})
 
 set(COMMON_SRCS
+  clock.cc
   id_mapping.cc
   entity_ids.cc
   key_encoder.cc
   partial_row.cc
-  partition.cc
   row_key-util.cc
+  row_mark.cc
   schema.cc
   index.cc
   jsonb.cc
@@ -107,11 +108,14 @@ set(COMMON_SRCS
   doc_hybrid_time.cc
   consistent_read_point.cc
   transaction.cc
+  transaction_error.cc
   types.cc
   wire_protocol.cc
+  ql_bfunc.cc
+  ql_datatype.cc
+  ql_name.cc
   ql_type.cc
   ql_value.cc
-  ql_bfunc.cc
   ql_protocol_util.cc
   ql_scanspec.cc
   ql_rowblock.cc
@@ -119,7 +123,6 @@ set(COMMON_SRCS
   ql_expr.cc
   common_flags.cc
   pgsql_error.cc
-  pgsql_resultset.cc
   roles_permissions.cc
   ybc_util.cc
   ybc-internal.cc
@@ -144,11 +147,7 @@ set(COMMON_LIBS
   gutil)
 
 if (NOT APPLE)
-  if (USING_LINUXREW)
-    list(APPEND COMMON_LIBS libuuid)
-  else()
-    list(APPEND COMMON_LIBS uuid)
-  endif()
+  list(APPEND COMMON_LIBS libuuid)
 endif()
 
 ADD_YB_LIBRARY(yb_common
@@ -156,14 +155,30 @@ ADD_YB_LIBRARY(yb_common
   DEPS ${COMMON_LIBS})
 add_dependencies(yb_common yb_bfql yb_bfpg)
 
+set(PARTITION_SRCS
+  partition.cc
+  )
+
+set(PARTITION_DEPS
+  yb_common
+  yb_util
+  yb_docdb_encoding
+  )
+
+ADD_YB_LIBRARY(yb_partition
+  SRCS ${PARTITION_SRCS}
+  DEPS ${PARTITION_DEPS}
+  )
+
 add_library(yb_common_test_util
             transaction-test-util.cc)
 target_link_libraries(yb_common_test_util
                       yb_common)
 
-set(YB_TEST_LINK_LIBS yb_common ${YB_MIN_TEST_LIBS})
+set(YB_TEST_LINK_LIBS yb_common yb_partition ${YB_MIN_TEST_LIBS})
 ADD_YB_TEST(id_mapping-test)
 ADD_YB_TEST(jsonb-test)
+ADD_YB_TEST(ql_table_row-test)
 ADD_YB_TEST(partial_row-test)
 ADD_YB_TEST(partition-test)
 ADD_YB_TEST(row_key-util-test)

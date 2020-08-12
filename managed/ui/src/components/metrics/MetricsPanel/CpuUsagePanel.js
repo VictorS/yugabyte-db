@@ -2,8 +2,8 @@
 
 import React, { Component, Fragment } from 'react';
 import { Graph } from '../';
-import {isNonEmptyArray} from 'utils/ObjectUtils';
-import { YBResourceCount } from 'components/common/descriptors';
+import {isNonEmptyArray} from '../../../utils/ObjectUtils';
+import { YBResourceCount } from '../../../components/common/descriptors';
 import './MetricsPanel.scss';
 
 export default class CpuUsagePanel extends Component {
@@ -20,7 +20,7 @@ export default class CpuUsagePanel extends Component {
     try {
       if (isNonEmptyArray(metric.data)) {
         if (isKubernetes) {
-          usage.system = parseFloat(metric.data.find((item) => item.name === 'cpu_usage').y[0]);
+          usage.system = parseFloat(metric.data.find((item) => item.name === 'cpu_usage').y.slice(-1)[0]);
         } else {
           usage.system = parseFloat(metric.data.find((item)=>item.name==="system").y.slice(-1)[0]);
           usage.user = parseFloat(metric.data.find((item)=>item.name==="user").y.slice(-1)[0]);

@@ -85,6 +85,16 @@ YBTableCreator& YBTableCreator::num_tablets(int32_t count) {
   return *this;
 }
 
+YBTableCreator& YBTableCreator::colocated(const bool colocated) {
+  colocated_ = colocated;
+  return *this;
+}
+
+YBTableCreator& YBTableCreator::tablegroup_id(const std::string& tablegroup_id) {
+  tablegroup_id_ = tablegroup_id;
+  return *this;
+}
+
 YBTableCreator& YBTableCreator::schema(const YBSchema* schema) {
   schema_ = schema;
   return *this;
@@ -108,7 +118,8 @@ YBTableCreator& YBTableCreator::add_hash_partitions(const std::vector<std::strin
 }
 
 YBTableCreator& YBTableCreator::set_range_partition_columns(
-    const std::vector<std::string>& columns) {
+    const std::vector<std::string>& columns,
+    const std::vector<std::string>& split_rows) {
   PartitionSchemaPB::RangeSchemaPB* range_schema =
     partition_schema_.mutable_range_schema();
   range_schema->Clear();
@@ -116,6 +127,9 @@ YBTableCreator& YBTableCreator::set_range_partition_columns(
     range_schema->add_columns()->set_name(col_name);
   }
 
+  for (const auto& row : split_rows) {
+    range_schema->add_split_rows(row);
+  }
   return *this;
 }
 
@@ -140,6 +154,16 @@ YBTableCreator& YBTableCreator::is_unique_index(bool is_unique_index) {
   return *this;
 }
 
+YBTableCreator& YBTableCreator::skip_index_backfill(const bool skip_index_backfill) {
+  skip_index_backfill_ = skip_index_backfill;
+  return *this;
+}
+
+YBTableCreator& YBTableCreator::use_mangled_column_name(bool value) {
+  index_info_.set_use_mangled_column_name(value);
+  return *this;
+}
+
 YBTableCreator& YBTableCreator::timeout(const MonoDelta& timeout) {
   timeout_ = timeout;
   return *this;
@@ -147,6 +171,11 @@ YBTableCreator& YBTableCreator::timeout(const MonoDelta& timeout) {
 
 YBTableCreator& YBTableCreator::wait(bool wait) {
   wait_ = wait;
+  return *this;
+}
+
+YBTableCreator& YBTableCreator::TEST_use_old_style_create_request() {
+  TEST_use_old_style_create_request_ = true;
   return *this;
 }
 
@@ -178,6 +207,7 @@ Status YBTableCreator::Create() {
   req.set_name(table_name_.table_name());
   table_name_.SetIntoNamespaceIdentifierPB(req.mutable_namespace_());
   req.set_table_type(table_type_);
+  req.set_colocated(colocated_);
 
   if (!creator_role_name_.empty()) {
     req.set_creator_role_name(creator_role_name_);
@@ -193,6 +223,10 @@ Status YBTableCreator::Create() {
     req.set_is_pg_shared_table(*is_pg_shared_table_);
   }
 
+  if (!tablegroup_id_.empty()) {
+    req.set_tablegroup_id(tablegroup_id_);
+  }
+
   // Note that the check that the sum of min_num_replicas for each placement block being less or
   // equal than the overall placement info num_replicas is done on the master side and an error is
   // naturally returned if you try to create a table and the numbers mismatch. As such, it is the
@@ -204,29 +238,35 @@ Status YBTableCreator::Create() {
   SchemaToPB(internal::GetSchema(*schema_), req.mutable_schema());
 
   // Setup the number splits (i.e. number of splits).
-  if (num_tablets_ <= 0) {
+  if (num_tablets_ > 0) {
+    VLOG(1) << "num_tablets: number of tablets explicitly specified: " << num_tablets_;
+  } else if (schema_->table_properties().num_tablets() > 0) {
+    num_tablets_ = schema_->table_properties().num_tablets();
+  } else {
     if (table_name_.is_system()) {
       num_tablets_ = 1;
       VLOG(1) << "num_tablets=1: using one tablet for a system table";
     } else {
       num_tablets_ = VERIFY_RESULT(client_->NumTabletsForUserTable(table_type_));
     }
-  } else {
-    VLOG(1) << "num_tablets: number of tablets explicitly specified: " << num_tablets_;
   }
-
+  req.mutable_schema()->mutable_table_properties()->set_num_tablets(num_tablets_);
   req.set_num_tablets(num_tablets_);
+
   req.mutable_partition_schema()->CopyFrom(partition_schema_);
 
   // Index mapping with data-table being indexed.
   if (index_info_.has_indexed_table_id()) {
-    req.mutable_index_info()->CopyFrom(index_info_);
+    if (!TEST_use_old_style_create_request_) {
+      req.mutable_index_info()->CopyFrom(index_info_);
+    }
 
     // For compatibility reasons, set the old fields just in case we have new clients talking to
     // old master server during rolling upgrade.
     req.set_indexed_table_id(index_info_.indexed_table_id());
     req.set_is_local_index(index_info_.is_local());
     req.set_is_unique_index(index_info_.is_unique());
+    req.set_skip_index_backfill(skip_index_backfill_);
   }
 
   auto deadline = CoarseMonoClock::Now() +
@@ -250,6 +290,17 @@ Status YBTableCreator::Create() {
   if (wait_) {
     RETURN_NOT_OK(client_->data_->WaitForCreateTableToFinish(
         client_, YBTableName(), table_id_, deadline));
+    if (s.ok() && table_type_ == TableType::YQL_TABLE_TYPE && index_info_.has_indexed_table_id()) {
+      auto index_perm = client_->data_->GetIndexPermissions(
+          client_, index_info_.indexed_table_id(), table_id_, deadline);
+      VLOG(1) << "GetIndexPermissions returned " << index_perm;
+      // If we know that the backfill has failed, then return an error.
+      // Timeout is not considered an error because ycql does not wait for the backfill
+      // to complete.
+      if (!index_perm && index_perm.status().IsNotFound()) {
+        return STATUS(RemoteError, "Create/backfill index failed.");
+      }
+    }
   }
 
   if (s.ok() && !FLAGS_client_suppress_created_logs) {

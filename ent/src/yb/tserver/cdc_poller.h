@@ -16,7 +16,11 @@
 
 #include "yb/cdc/cdc_util.h"
 #include "yb/cdc/cdc_output_client_interface.h"
+#include "yb/rpc/rpc.h"
+#include "yb/tserver/cdc_consumer.h"
 #include "yb/tserver/tablet_server.h"
+#include "yb/util/locks.h"
+#include "yb/util/status.h"
 
 #ifndef ENT_SRC_YB_TSERVER_CDC_POLLER_H
 #define ENT_SRC_YB_TSERVER_CDC_POLLER_H
@@ -37,12 +41,6 @@ class CDCServiceProxy;
 
 } // namespace cdc
 
-namespace client {
-
-class YBClient;
-
-} // namespace client
-
 namespace tserver {
 namespace enterprise {
 
@@ -54,26 +52,26 @@ class CDCPoller {
   CDCPoller(const cdc::ProducerTabletInfo& producer_tablet_info,
             const cdc::ConsumerTabletInfo& consumer_tablet_info,
             std::function<bool(void)> should_continue_polling,
-            std::function<cdc::CDCServiceProxy*(void)> get_proxy,
             std::function<void(void)> remove_self_from_pollers_map,
             ThreadPool* thread_pool,
-            const std::shared_ptr<client::YBClient>& client,
-            CDCConsumer* cdc_consumer);
-  ~CDCPoller();
+            const std::shared_ptr<CDCClient>& local_client,
+            const std::shared_ptr<CDCClient>& producer_client,
+            CDCConsumer* cdc_consumer,
+            bool use_local_tserver);
+  ~CDCPoller() = default;
 
   // Begins poll process for a producer tablet.
   void Poll();
 
-  std::string ToString() const;
+  std::string LogPrefixUnlocked() const;
 
  private:
   bool CheckOnline();
 
   void DoPoll();
-  // Async handler for Poll.
-  void HandlePoll();
   // Does the work of sending the changes to the output client.
-  void DoHandlePoll();
+  void HandlePoll(yb::Status status,
+                  std::shared_ptr<cdc::GetChangesResponsePB> resp);
   // Async handler for the response from output client.
   void HandleApplyChanges(cdc::OutputClientResponse response);
   // Does the work of polling for new changes.
@@ -82,20 +80,26 @@ class CDCPoller {
   cdc::ProducerTabletInfo producer_tablet_info_;
   cdc::ConsumerTabletInfo consumer_tablet_info_;
   std::function<bool()> should_continue_polling_;
-  std::function<cdc::CDCServiceProxy*(void)> get_proxy_;
   std::function<void(void)> remove_self_from_pollers_map_;
 
-  consensus::OpId op_id_;
-  std::unique_ptr<cdc::GetChangesResponsePB> resp_;
-  std::unique_ptr<rpc::RpcController> rpc_;
+  // Although this is processing serially, it might be on a different thread in the ThreadPool.
+  // Using mutex to guarantee cache flush, preventing TSAN warnings.
+  std::mutex data_mutex_;
+
+  OpIdPB op_id_ GUARDED_BY(data_mutex_);
+
+  yb::Status status_ GUARDED_BY(data_mutex_);
+  std::shared_ptr<cdc::GetChangesResponsePB> resp_ GUARDED_BY(data_mutex_);
+
   std::unique_ptr<cdc::CDCOutputClient> output_client_;
+  std::shared_ptr<CDCClient> producer_client_;
 
   ThreadPool* thread_pool_;
   CDCConsumer* cdc_consumer_;
 
   std::atomic<bool> is_polling_{true};
-  int poll_failures_{0};
-  int apply_failures_{0};
+  int poll_failures_ GUARDED_BY(data_mutex_){0};
+  int apply_failures_ GUARDED_BY(data_mutex_){0};
 };
 
 } // namespace enterprise

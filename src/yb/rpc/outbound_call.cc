@@ -52,7 +52,6 @@
 
 #include "yb/util/concurrent_value.h"
 #include "yb/util/flag_tags.h"
-#include "yb/util/kernel_stack_watchdog.h"
 #include "yb/util/memory/memory.h"
 #include "yb/util/pb_util.h"
 #include "yb/util/trace.h"
@@ -503,11 +502,13 @@ void OutboundCall::SetTimedOut() {
   TRACE_TO(trace_, "Call TimedOut.");
   bool invoke_callback;
   {
-    auto status = STATUS_FORMAT(TimedOut,
-                                "$0 RPC to $1 timed out after $2",
-                                remote_method_->method_name(),
-                                conn_id_.remote(),
-                                controller_->timeout());
+    auto status = STATUS_FORMAT(
+        TimedOut,
+        "$0 RPC (request call id $3) to $1 timed out after $2",
+        remote_method_->method_name(),
+        conn_id_.remote(),
+        controller_->timeout(),
+        call_id_);
     std::lock_guard<simple_spinlock> l(lock_);
     status_ = std::move(status);
     invoke_callback = SetState(TIMED_OUT);
@@ -536,9 +537,13 @@ string OutboundCall::ToString() const {
 bool OutboundCall::DumpPB(const DumpRunningRpcsRequestPB& req,
                           RpcCallInProgressPB* resp) {
   std::lock_guard<simple_spinlock> l(lock_);
+  auto state_value = state();
+  if (!req.dump_timed_out() && state_value == RpcCallState::TIMED_OUT) {
+    return false;
+  }
   InitHeader(resp->mutable_header());
-  resp->set_micros_elapsed(MonoTime::Now().GetDeltaSince(start_).ToMicroseconds());
-  resp->set_state(state());
+  resp->set_elapsed_millis(MonoTime::Now().GetDeltaSince(start_).ToMilliseconds());
+  resp->set_state(state_value);
   if (req.include_traces() && trace_) {
     resp->set_trace_buffer(trace_->DumpToString(true));
   }

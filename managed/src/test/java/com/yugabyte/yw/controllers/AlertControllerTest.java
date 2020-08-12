@@ -14,6 +14,7 @@ import com.yugabyte.yw.common.CallHomeManager.CollectionLevel;
 import com.yugabyte.yw.common.ModelFactory;
 import com.yugabyte.yw.metrics.MetricQueryHelper;
 import com.yugabyte.yw.models.Customer;
+import com.yugabyte.yw.models.Users;
 
 import com.yugabyte.yw.models.CustomerConfig;
 import com.yugabyte.yw.models.Universe;
@@ -37,6 +38,7 @@ import java.util.UUID;
 
 import static com.yugabyte.yw.common.AssertHelper.assertBadRequest;
 import static com.yugabyte.yw.common.AssertHelper.assertValue;
+import static com.yugabyte.yw.common.AssertHelper.assertAuditEntry;
 import static com.yugabyte.yw.common.FakeApiHelper.doRequestWithAuthTokenAndBody;
 import static com.yugabyte.yw.common.FakeApiHelper.doRequestWithAuthToken;
 import static com.yugabyte.yw.common.ModelFactory.createUniverse;
@@ -54,12 +56,14 @@ import static play.test.Helpers.fakeRequest;
 
 public class AlertControllerTest extends FakeDBApplication {
   private Customer customer;
+  private Users user;
   private String authToken;
 
   @Before
   public void setUp() {
     customer = ModelFactory.testCustomer();
-    authToken = customer.createAuthToken();
+    user = ModelFactory.testUser(customer);
+    authToken = user.createAuthToken();
   }
 
   @Test
@@ -81,6 +85,7 @@ public class AlertControllerTest extends FakeDBApplication {
     result = doRequestWithAuthToken("GET",
         "/api/customers/" + customer.uuid + "/alerts", authToken);
     assertEquals(OK, result.status());
+    assertAuditEntry(1, customer.uuid);
     JsonNode json = Json.parse(contentAsString(result));
     assertEquals(1, json.size());
     JsonNode alert = json.get(0);
@@ -139,5 +144,6 @@ public class AlertControllerTest extends FakeDBApplication {
     String errMsg = String.format("Expected second alert's createTime to be later than first."
       + "First: %s. Second: %s.", firstDate, secondDate);
     assertTrue(errMsg, secondDate.after(firstDate));
+    assertAuditEntry(2, customer.uuid);
   }
 }

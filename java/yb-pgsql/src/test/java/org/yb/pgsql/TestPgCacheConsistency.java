@@ -21,6 +21,7 @@ import org.postgresql.util.PSQLException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.yb.minicluster.MiniYBCluster;
+import org.yb.util.MiscUtil.ThrowingRunnable;
 import org.yb.util.YBTestRunnerNonTsanOnly;
 
 import java.sql.Connection;
@@ -65,7 +66,7 @@ public class TestPgCacheConsistency extends BasePgSQLTest {
       // Drop table from connection 2.
       statement2.execute("DROP TABLE cache_test1");
 
-      // Check that insert now fails on both tables.
+      // Check that insert now fails on both connections.
       runInvalidQuery(statement1, "INSERT INTO cache_test1(a) VALUES (3)", "does not exist");
       runInvalidQuery(statement2, "INSERT INTO cache_test1(a) VALUES (4)", "does not exist");
 
@@ -132,6 +133,59 @@ public class TestPgCacheConsistency extends BasePgSQLTest {
 
       // Check values.
       try (ResultSet rs = statement1.executeQuery("SELECT * FROM cache_test2")) {
+        assertEquals(expectedRows, getRowSet(rs));
+      }
+      expectedRows.clear();
+
+      // Test functions.
+
+      // Create a function on connection 1.
+      statement1.execute("create or replace function inc(n in integer)\n" +
+                                 "  returns integer\n" +
+                                 "  language 'plpgsql'\n" +
+                                 "as $$\n" +
+                                 "begin\n" +
+                                 "  return n + 1;\n" +
+                                 "end\n" +
+                                 "$$");
+
+      // Check result from connection 1.
+      expectedRows.add(new Row( 11));
+      try (ResultSet rs = statement1.executeQuery("SELECT inc(10)")) {
+        assertEquals(expectedRows, getRowSet(rs));
+      }
+      expectedRows.clear();
+
+      // Check result from connection 2.
+      expectedRows.add(new Row( 16));
+      try (ResultSet rs = statement2.executeQuery("SELECT inc(15)")) {
+        assertEquals(expectedRows, getRowSet(rs));
+      }
+      expectedRows.clear();
+
+      // Alter (replace) the function (increment 1 -> 101) from connection 2.
+      statement2.execute("create or replace function inc(n in integer)\n" +
+                                 "  returns integer\n" +
+                                 "  language 'plpgsql'\n" +
+                                 "as $$\n" +
+                                 "begin\n" +
+                                 "  return n + 101;\n" +
+                                 "end\n" +
+                                 "$$");
+
+      // Wait for tserver heartbeat to propagate the catalog version.
+      waitForTServerHeartbeat();
+
+      // Check result from connection 1.
+      expectedRows.add(new Row( 111));
+      try (ResultSet rs = statement1.executeQuery("SELECT inc(10)")) {
+        assertEquals(expectedRows, getRowSet(rs));
+      }
+      expectedRows.clear();
+
+      // Check result from connection 2.
+      expectedRows.add(new Row( 116));
+      try (ResultSet rs = statement2.executeQuery("SELECT inc(15)")) {
         assertEquals(expectedRows, getRowSet(rs));
       }
       expectedRows.clear();
@@ -388,7 +442,7 @@ public class TestPgCacheConsistency extends BasePgSQLTest {
       assertQuery(
           statement2,
           "EXPLAIN (COSTS OFF) SELECT u FROM test_table WHERE u = 1",
-          new Row("Foreign Scan on test_table"),
+          new Row("Seq Scan on test_table"),
           new Row("  Filter: (u = 1)")
       );
     }
@@ -437,10 +491,6 @@ public class TestPgCacheConsistency extends BasePgSQLTest {
       // Connection 2 observes the new membership roles list.
       statement2.execute("SET ROLE some_group");
     }
-  }
-
-  private interface ThrowingRunnable {
-    void run() throws Throwable;
   }
 
   private static Optional<Throwable> captureThrow(ThrowingRunnable action) {

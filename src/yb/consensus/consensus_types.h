@@ -19,6 +19,9 @@
 #include "yb/consensus/consensus_fwd.h"
 
 namespace yb {
+
+struct OpId;
+
 namespace consensus {
 
 // Used for a callback that sets a transaction's timestamp and starts the MVCC transaction for
@@ -26,35 +29,17 @@ namespace consensus {
 // log, so that timestamps always keep increasing in the log, unless entries are being overwritten.
 class ConsensusAppendCallback {
  public:
-  virtual void HandleConsensusAppend() = 0;
+  // Invoked when appropriate operation was appended to consensus.
+  // op_id - assigned operation id.
+  // committed_op_id - committed operation id.
+  //
+  // Should initialize appropriate replicate message.
+  virtual void HandleConsensusAppend(const yb::OpId& op_id, const yb::OpId& committed_op_id) = 0;
   virtual ~ConsensusAppendCallback() {}
 };
 
 struct ConsensusOptions {
   std::string tablet_id;
-};
-
-// Factory for replica transactions.
-// An implementation of this factory must be registered prior to consensus
-// start, and is used to create transactions when the consensus implementation receives
-// messages from the leader.
-//
-// Replica transactions execute the following way:
-//
-// - When a ReplicateMsg is first received from the leader, the Consensus
-//   instance creates the ConsensusRound and calls StartReplicaOperation().
-//   This will trigger the Prepare(). At the same time replica consensus
-//   instance immediately stores the ReplicateMsg in the Log. Once the replicate
-//   message is stored in stable storage an ACK is sent to the leader (i.e. the
-//   replica Consensus instance does not wait for Prepare() to finish).
-class ReplicaOperationFactory {
- public:
-  virtual CHECKED_STATUS StartReplicaOperation(
-      const ConsensusRoundPtr& context, HybridTime propagated_safe_time) = 0;
-  virtual void SetPropagatedSafeTime(HybridTime ht) = 0;
-  virtual bool ShouldApplyWrite() = 0;
-
-  virtual ~ReplicaOperationFactory() {}
 };
 
 } // namespace consensus

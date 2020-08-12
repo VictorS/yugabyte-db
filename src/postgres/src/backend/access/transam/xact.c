@@ -190,8 +190,10 @@ typedef struct TransactionStateData
 	bool		didLogXid;		/* has xid been included in WAL record? */
 	int			parallelModeLevel;	/* Enter/ExitParallelMode counter */
 	struct TransactionStateData *parent;	/* back link to parent */
+	bool		ybDataSent; /* Whether some tuples have been transmitted to
+				             * frontend as part of this execution */
 	bool		isYBTxnWithPostgresRel; /* does the current transaction
-										   * operate on a postgres table? */
+				                         * operate on a postgres table? */
 } TransactionStateData;
 
 typedef TransactionStateData *TransactionState;
@@ -222,7 +224,9 @@ static TransactionStateData TopTransactionStateData = {
 	false,						/* startedInRecovery */
 	false,						/* didLogXid */
 	0,							/* parallelModeLevel */
-	NULL						/* link to parent state block */
+	NULL,						/* link to parent state block */
+	false,						/* ybDataSent */
+	false						/* isYBTxnWithPostgresRel */
 };
 
 /*
@@ -989,6 +993,27 @@ ForceSyncCommit(void)
 	forceSyncCommit = true;
 }
 
+/*
+ * Mark current transaction as having sent some data back to the client.
+ * This prevents automatic transaction restart.
+ */
+void YBMarkDataSent(void)
+{
+	TransactionState s = CurrentTransactionState;
+	s->ybDataSent = true;
+}
+
+/*
+ * Whether some data has been transmitted to frontend as part of this transaction.
+ */
+bool YBIsDataSent(void)
+{
+	// Note: we don't support nested transactions (savepoints) yet,
+	// but once we do - we have to make sure this works as intended.
+	TransactionState s = CurrentTransactionState;
+	// Ignoring "idle" transaction state, a leftover from a previous transaction
+	return s->blockState != TBLOCK_DEFAULT && s->ybDataSent;
+}
 
 /* ----------------------------------------------------------------
  *						StartTransaction stuff
@@ -1818,6 +1843,25 @@ AtSubCleanup_Memory(void)
  */
 
 /*
+ * Do a Yugabyte-specific initialization of transaction when it starts,
+ * called as a part of StartTransaction
+ */
+static void
+YBStartTransaction(TransactionState s)
+{
+	s->isYBTxnWithPostgresRel = !IsYugaByteEnabled();
+	s->ybDataSent             = false;
+
+	if (YBTransactionsEnabled())
+	{
+		YBCPgBeginTransaction();
+		YBCPgSetTransactionIsolationLevel(XactIsoLevel);
+		YBCPgSetTransactionReadOnly(XactReadOnly);
+		YBCPgSetTransactionDeferrable(XactDeferrable);
+	}
+}
+
+/*
  *	StartTransaction
  */
 static void
@@ -1836,8 +1880,6 @@ StartTransaction(void)
 
 	/* check the current transaction state */
 	Assert(s->state == TRANS_DEFAULT);
-
-	s->isYBTxnWithPostgresRel = IsYugaByteEnabled() ? false : true;
 
 	/*
 	 * Set the current transaction state information appropriately during
@@ -1967,10 +2009,7 @@ StartTransaction(void)
 	 */
 	s->state = TRANS_INPROGRESS;
 
-	if (YBTransactionsEnabled())
-	{
-		YBCPgTxnManager_BeginTransaction(YBCGetPgTxnManager(), XactIsoLevel);
-	}
+	YBStartTransaction(s);
 
 	ShowTransactionState("StartTransaction");
 }
@@ -2025,6 +2064,15 @@ CommitTransaction(void)
 		if (!PreCommit_Portals(false))
 			break;
 	}
+
+	/*
+	 * Firing the triggers may abort current transaction.
+	 * At this point all the them has been fired already.
+	 * It is time to commit YB transaction.
+	 * Postgres transaction can be aborted at this point without an issue
+	 * in case of YBCCommitTransaction failure.
+	 */
+	YBCCommitTransaction();
 
 	CallXactCallbacks(is_parallel_worker ? XACT_EVENT_PARALLEL_PRE_COMMIT
 					  : XACT_EVENT_PRE_COMMIT);
@@ -2683,9 +2731,7 @@ AbortTransaction(void)
 		pgstat_report_xact_timestamp(0);
 	}
 
-	if (YBTransactionsEnabled()) {
-		YBCPgTxnManager_AbortTransaction(YBCGetPgTxnManager());
-	}
+	YBCAbortTransaction();
 
 	/*
 	 * State remains TRANS_ABORT until CleanupTransaction().
@@ -2826,26 +2872,6 @@ IsCurrentTxnWithPGRel(void)
 	return CurrentTransactionState->isYBTxnWithPostgresRel;
 }
 
-void
-YBCCommitTransactionAndUpdateBlockState() {
-	TransactionState s = CurrentTransactionState;
-	if (YBCCommitTransaction()) {
-		/*
-		 * This is still needed in the YugaByte case because we need to manage the
-		 * PostgreSQL transaction state correctly.
-		 */
-		CommitTransaction();
-		s->blockState = TBLOCK_DEFAULT;
-	} else {
-    /*
-     * TBLOCK_STARTED means that we aren't in a transaction block, so should switch to
-     * default state in this case.
-     */
-		s->blockState = s->blockState == TBLOCK_STARTED ? TBLOCK_DEFAULT : TBLOCK_ABORT;
-		YBCHandleCommitError();
-	}
-}
-
 /*
  *	CommitTransactionCommand
  */
@@ -2873,11 +2899,6 @@ CommitTransactionCommand(void)
 			 * transaction commit, and return to the idle state.
 			 */
 		case TBLOCK_STARTED:
-			if (YBTransactionsEnabled())
-			{
-				YBCCommitTransactionAndUpdateBlockState();
-				break;
-			}
 			CommitTransaction();
 			s->blockState = TBLOCK_DEFAULT;
 			break;
@@ -2908,11 +2929,6 @@ CommitTransactionCommand(void)
 			 * idle state.
 			 */
 		case TBLOCK_END:
-			if (YBTransactionsEnabled())
-			{
-				YBCCommitTransactionAndUpdateBlockState();
-				break;
-			}
 			CommitTransaction();
 			s->blockState = TBLOCK_DEFAULT;
 			break;
@@ -3661,14 +3677,6 @@ EndTransactionBlock(void)
 			 */
 		case TBLOCK_INPROGRESS:
 			s->blockState = TBLOCK_END;
-			if (YBTransactionsEnabled()) {
-				/*
-				 * YugaByte transaction commit happens here, but could also happen in
-				 * CommitTransactionCommand if this function is not called first.
-				 */
-				result = YBCCommitTransaction();
-				break;
-			}
 			result = true;
 			break;
 
@@ -4635,7 +4643,7 @@ IsSubTransaction(void)
  * If you're wondering why this is separate from PushTransaction: it's because
  * we can't conveniently do this stuff right inside DefineSavepoint.  The
  * SAVEPOINT utility command will be executed inside a Portal, and if we
- * muck with CurrentMemoryContext or CurrentResourceOwner then exit from
+ * muck with GetCurrentMemoryContext() or CurrentResourceOwner then exit from
  * the Portal will undo those settings.  So we make DefineSavepoint just
  * push a dummy transaction block, and when control returns to the main
  * idle loop, CommitTransactionCommand will be called, and we'll come here
@@ -5232,11 +5240,13 @@ ShowTransactionStateRec(const char *str, TransactionState s)
 
 	/* use ereport to suppress computation if msg will not be printed */
 	ereport(DEBUG5,
-			(errmsg_internal("%s(%d) name: %s; blockState: %s; state: %s, xid/subid/cid: %u/%u/%u%s%s",
+			(errmsg_internal("%s(%d) name: %s; blockState: %s; "
+							 "state: %s, ybDataSent: %s, xid/subid/cid: %u/%u/%u%s%s",
 							 str, s->nestingLevel,
 							 PointerIsValid(s->name) ? s->name : "unnamed",
 							 BlockStateAsString(s->blockState),
 							 TransStateAsString(s->state),
+							 s->ybDataSent ? "Y" : "N",
 							 (unsigned int) s->transactionId,
 							 (unsigned int) s->subTransactionId,
 							 (unsigned int) currentCommandId,

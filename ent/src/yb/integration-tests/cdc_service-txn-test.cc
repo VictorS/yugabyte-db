@@ -17,12 +17,16 @@
 #include "yb/client/table.h"
 #include "yb/client/transaction.h"
 #include "yb/client/txn-test-base.h"
+
 #include "yb/docdb/primitive_value.h"
 #include "yb/docdb/value_type.h"
+
+#include "yb/integration-tests/cdc_test_util.h"
+
 #include "yb/rpc/messenger.h"
 #include "yb/tablet/tablet.h"
 #include "yb/tserver/mini_tablet_server.h"
-#include "yb/util/cdc_test_util.h"
+
 #include "yb/util/slice.h"
 
 namespace yb {
@@ -188,17 +192,16 @@ TEST_F(CDCServiceTxnTest, TestGetChangesForPendingTransaction) {
 
   // Get CDC changes.
   {
-    RpcController rpc;
-    SCOPED_TRACE(change_req.DebugString());
-    ASSERT_OK(cdc_proxy_->GetChanges(change_req, &change_resp, &rpc));
-    SCOPED_TRACE(change_resp.DebugString());
-    ASSERT_FALSE(change_resp.has_error());
+    // Need to poll because Flush returns on majority_replicated and CDC waits for fully committed.
+    ASSERT_OK(WaitFor([&]() -> Result<bool> {
+      RpcController rpc;
+      change_resp.Clear();
+      RETURN_NOT_OK(cdc_proxy_->GetChanges(change_req, &change_resp, &rpc));
+      if (change_resp.has_error()) return Result<bool>(StatusFromPB(change_resp.error().status()));
 
-    // Expect at least 3 records because transaction is now committed.
-    // Transaction applying record may or may not be retrieved by GetChanges depending on timing
-    // but the 3 write records should definitely be retrieved.
-    ASSERT_GE(change_resp.records_size(), 3);
-    ASSERT_LE(change_resp.records_size(), 4);
+      // Expect at least 4 records because transaction is now committed: 3 rows + txn commit.
+      return change_resp.records_size() == 4;
+    }, MonoDelta::FromSeconds(30), "Wait for Transaction to be committed."));
 
     int32_t expected_order[3] = {10001, 10002, 10003};
 
@@ -208,11 +211,9 @@ TEST_F(CDCServiceTxnTest, TestGetChangesForPendingTransaction) {
       ASSERT_NO_FATALS(AssertIntKey(change_resp.records(i).key(), expected_order[i]));
     }
 
-    if (change_resp.records_size() == 4) {
-      // Check the APPLYING transaction record.
-      ASSERT_EQ(change_resp.records(3).changes_size(), 0);
-      ASSERT_TRUE(change_resp.records(3).has_transaction_state());
-    }
+    // Check the APPLYING transaction record.
+    ASSERT_EQ(change_resp.records(3).changes_size(), 0);
+    ASSERT_TRUE(change_resp.records(3).has_transaction_state());
   }
 }
 

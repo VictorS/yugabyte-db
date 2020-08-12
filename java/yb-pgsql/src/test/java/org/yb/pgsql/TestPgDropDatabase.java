@@ -12,6 +12,7 @@
 //
 package org.yb.pgsql;
 
+import com.google.common.net.HostAndPort;
 import org.apache.commons.lang3.RandomUtils;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -19,6 +20,10 @@ import org.postgresql.core.TransactionState;
 import org.postgresql.util.PSQLException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.yb.AssertionWrappers;
+import org.yb.client.AsyncYBClient;
+import org.yb.client.TestUtils;
+import org.yb.client.YBClient;
 import org.yb.minicluster.MiniYBClusterBuilder;
 import org.yb.util.SanitizerUtil;
 import org.yb.util.YBTestRunnerNonTsanOnly;
@@ -118,6 +123,103 @@ public class TestPgDropDatabase extends BasePgSQLTest {
     try {
       CreateDatabaseObjects(connection1);
       fail(String.format("Execute statements in dropped database '%s' did not fail", dbname));
+    } catch (Exception ex) {
+      LOG.info("Expected connection failure", ex);
+    }
+  }
+
+  private void runProcess(String... args) throws Exception {
+    assertEquals(0, new ProcessBuilder(args).start().waitFor());
+  }
+
+  private void setWriteRejection(HostAndPort server, int percentage) throws Exception {
+    runProcess(TestUtils.findBinary("yb-ts-cli"),
+               "--server_address",
+               server.toString(),
+               "set_flag",
+               "-force",
+               "TEST_sys_catalog_write_rejection_percentage",
+               Integer.toString(percentage));
+  }
+
+  @Test
+  public void testCreateDatabaseWithFailures() throws Exception {
+    String dbname = "basic_db";
+
+    // Toggle a GFLAG on the Master at runtime to cause periodic low-level IO failures.
+    AsyncYBClient client = new AsyncYBClient.AsyncYBClientBuilder(masterAddresses).build();
+    YBClient syncClient = new YBClient(client);
+    HostAndPort leaderMaster = syncClient.getLeaderMasterHostAndPort();
+    // Don't set to 100% to test a couple write locations in the control path.
+    setWriteRejection(leaderMaster, 50);
+
+    // Try to create a database, expecting failures.
+    Connection connection0 = createConnection(0);
+    int failures = 0;
+    int tries = 0;
+    do {
+      try (Statement statement0 = connection0.createStatement()) {
+        statement0.execute(String.format("CREATE DATABASE %s", dbname));
+      } catch (PSQLException ex) {
+        LOG.info("Expected error: " + ex.getMessage());
+        ++failures;
+      }
+      if (failures == 0) {
+        LOG.warn("No failure occurred (uncommon). Cleaning up for the next loop.");
+        setWriteRejection(leaderMaster, 0);
+        try (Statement statement0 = connection0.createStatement()) {
+          statement0.execute(String.format("DROP DATABASE %s", dbname));
+        }
+        setWriteRejection(leaderMaster, 100); // Guarantee failure on the next loop.
+      }
+    } while (Math.max(tries++, failures) == 0);
+    assertNotEquals(0, failures);
+
+    // Toggle a GFLAG on the Master at runtime to disable low-level IO failures.
+    setWriteRejection(leaderMaster, 0);
+
+    // Create the same database name. NOW expecting success.
+    failures = 0;
+    try (Statement statement0 = connection0.createStatement()) {
+      statement0.execute(String.format("CREATE DATABASE %s", dbname));
+    } catch (PSQLException ex) {
+      LOG.info("Unexpected error: " + ex.getMessage());
+      ++failures;
+    }
+    assertEquals(0, failures);
+  }
+
+  @Test
+  public void testDropDatabaseNotFoundOnMaster() throws Exception {
+    String dbname = "basic_db";
+
+    // Create database.
+    Connection connection0 = createConnection(0);
+    try (Statement statement0 = connection0.createStatement()) {
+      statement0.execute(String.format("CREATE DATABASE %s", dbname));
+    }
+
+    // Creating a few objects in the database.
+    Connection connection1 = createConnection(1, dbname);
+    CreateDatabaseObjects(connection1);
+    connection1.close();
+
+    // Delete the database on the master.  Should still have data stored at Postgres layer.
+    runProcess(TestUtils.findBinary("yb-admin"),
+               "--master_addresses",
+               masterAddresses,
+               "delete_namespace",
+               "ysql." + dbname);
+
+    // Drop the database. Should succeed, even though there's no work to handle on master.
+    try (Statement statement0 = connection0.createStatement()) {
+      statement0.execute(String.format("DROP DATABASE %s", dbname));
+    }
+
+    // Connect should fail as database should not exist.
+    try {
+      createConnection(2, dbname);
+      fail(String.format("Connecting to non-existing database '%s' did not fail", dbname));
     } catch (Exception ex) {
       LOG.info("Expected connection failure", ex);
     }

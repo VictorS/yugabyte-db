@@ -81,8 +81,8 @@ public class EditUniverse extends UniverseDefinitionTaskBase {
       // Update the DNS entry for this universe, based in primary provider info.
       UserIntent primaryIntent = universe.getUniverseDetails().getPrimaryCluster().userIntent;
       createDnsManipulationTask(DnsManager.DnsCommandType.Edit, false, primaryIntent.providerType,
-                                primaryIntent.provider, primaryIntent.universeName)
-          .setSubTaskGroupType(SubTaskGroupType.ConfigureUniverse);
+              primaryIntent.provider, primaryIntent.universeName)
+              .setSubTaskGroupType(SubTaskGroupType.ConfigureUniverse);
 
       // Marks the update of this universe as a success only if all the tasks before it succeeded.
       createMarkUniverseUpdateSuccessTasks()
@@ -258,6 +258,14 @@ public class EditUniverse extends UniverseDefinitionTaskBase {
 
       // Change the master addresses in the conf file for the new tservers.
       createConfigureServerTasks(newTservers, false /* isShell */, true /* updateMasterAddrs */);
+      createSetFlagInMemoryTasks(newTservers, ServerType.TSERVER, true /* force flag update */,
+                                 null /* no gflag to update */, true /* updateMasterAddrs */);
+
+      // Change the master addresses in the conf file for the new masters.
+      createConfigureServerTasks(newMasters, false /* isShell */, true /* updateMasterAddrs */,
+                                 true /* isMaster */);
+      createSetFlagInMemoryTasks(newMasters, ServerType.MASTER, true /* force flag update */,
+                                 null /* no gflag to update */, true /* updateMasterAddrs */);
 
       // Wait for the master leader to hear from all tservers.
       createWaitForTServerHeartBeatsTask()

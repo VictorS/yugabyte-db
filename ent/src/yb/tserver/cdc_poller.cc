@@ -15,6 +15,7 @@
 #include "yb/tserver/cdc_consumer.h"
 #include "yb/tserver/twodc_output_client.h"
 
+#include "yb/cdc/cdc_rpc.h"
 #include "yb/cdc/cdc_service.pb.h"
 #include "yb/cdc/cdc_service.proxy.h"
 #include "yb/client/client.h"
@@ -27,8 +28,11 @@ DEFINE_int32(async_replication_polling_delay_ms, 0,
              "How long to delay in ms between applying and repolling.");
 DEFINE_int32(replication_failure_delay_exponent, 16 /* ~ 2^16/1000 ~= 65 sec */,
              "Max number of failures (N) to use when calculating exponential backoff (2^N-1).");
+DEFINE_bool(cdc_consumer_use_proxy_forwarding, false,
+            "When enabled, read requests from the CDC Consumer that go to the wrong node are "
+            "forwarded to the correct node by the Producer.");
 
-DECLARE_int32(cdc_rpc_timeout_ms);
+DECLARE_int32(cdc_read_rpc_timeout_ms);
 
 namespace yb {
 namespace tserver {
@@ -37,35 +41,34 @@ namespace enterprise {
 CDCPoller::CDCPoller(const cdc::ProducerTabletInfo& producer_tablet_info,
                      const cdc::ConsumerTabletInfo& consumer_tablet_info,
                      std::function<bool(void)> should_continue_polling,
-                     std::function<cdc::CDCServiceProxy*(void)> get_proxy,
                      std::function<void(void)> remove_self_from_pollers_map,
                      ThreadPool* thread_pool,
-                     const std::shared_ptr<client::YBClient>& client,
-                     CDCConsumer* cdc_consumer) :
+                     const std::shared_ptr<CDCClient>& local_client,
+                     const std::shared_ptr<CDCClient>& producer_client,
+                     CDCConsumer* cdc_consumer,
+                     bool use_local_tserver) :
     producer_tablet_info_(producer_tablet_info),
     consumer_tablet_info_(consumer_tablet_info),
     should_continue_polling_(std::move(should_continue_polling)),
-    get_proxy_(std::move(get_proxy)),
     remove_self_from_pollers_map_(std::move(remove_self_from_pollers_map)),
     op_id_(consensus::MinimumOpId()),
     resp_(std::make_unique<cdc::GetChangesResponsePB>()),
-    rpc_(std::make_unique<rpc::RpcController>()),
     output_client_(CreateTwoDCOutputClient(
+        cdc_consumer,
         consumer_tablet_info,
-        client,
-        std::bind(&CDCPoller::HandleApplyChanges, this, std::placeholders::_1))),
+        local_client,
+        std::bind(&CDCPoller::HandleApplyChanges, this, std::placeholders::_1),
+        use_local_tserver)),
+    producer_client_(producer_client),
     thread_pool_(thread_pool),
     cdc_consumer_(cdc_consumer) {}
 
-CDCPoller::~CDCPoller() {
-  output_client_->Shutdown();
-}
-
-std::string CDCPoller::ToString() const {
-  std::ostringstream os;
-  os << "P " << producer_tablet_info_.stream_id << ":" << producer_tablet_info_.tablet_id
-     << " C " << consumer_tablet_info_.table_id << ":" << consumer_tablet_info_.tablet_id;
-  return os.str();
+std::string CDCPoller::LogPrefixUnlocked() const {
+  return strings::Substitute("P [$0:$1] C [$2:$3]: ",
+                             producer_tablet_info_.stream_id,
+                             producer_tablet_info_.tablet_id,
+                             consumer_tablet_info_.table_id,
+                             consumer_tablet_info_.tablet_id);
 }
 
 bool CDCPoller::CheckOnline() {
@@ -74,7 +77,7 @@ bool CDCPoller::CheckOnline() {
 
 #define RETURN_WHEN_OFFLINE() \
   if (!CheckOnline()) { \
-    LOG(WARNING) << "CDC Poller went offline: " << ToString(); \
+    LOG_WITH_PREFIX_UNLOCKED(WARNING) << "CDC Poller went offline"; \
     return; \
   }
 
@@ -87,6 +90,8 @@ void CDCPoller::Poll() {
 void CDCPoller::DoPoll() {
   RETURN_WHEN_OFFLINE();
 
+  std::lock_guard<std::mutex> l(data_mutex_);
+
   // determine if we should delay our upcoming poll
   if (FLAGS_async_replication_polling_delay_ms > 0 || poll_failures_ > 0) {
     int64_t delay = max(FLAGS_async_replication_polling_delay_ms, // user setting
@@ -97,42 +102,67 @@ void CDCPoller::DoPoll() {
   cdc::GetChangesRequestPB req;
   req.set_stream_id(producer_tablet_info_.stream_id);
   req.set_tablet_id(producer_tablet_info_.tablet_id);
+  req.set_serve_as_proxy(FLAGS_cdc_consumer_use_proxy_forwarding);
 
   cdc::CDCCheckpointPB checkpoint;
   *checkpoint.mutable_op_id() = op_id_;
-  *req.mutable_from_checkpoint() = checkpoint;
+  if (checkpoint.op_id().index() > 0 || checkpoint.op_id().term() > 0) {
+    // Only send non-zero checkpoints in request.
+    // If we don't know the latest checkpoint, then CDC producer can use the checkpoint from
+    // cdc_state table.
+    // This is useful in scenarios where a new tablet peer becomes replication leader for a
+    // producer tablet and is not aware of the last checkpoint.
+    *req.mutable_from_checkpoint() = checkpoint;
+  }
 
-  auto* proxy = get_proxy_();
-  resp_ = std::make_unique<cdc::GetChangesResponsePB>();
-  rpc_ = std::make_unique<rpc::RpcController>();
-  rpc_->set_timeout(MonoDelta::FromMilliseconds(FLAGS_cdc_rpc_timeout_ms));
-  proxy->GetChangesAsync(req, resp_.get(), rpc_.get(), std::bind(&CDCPoller::HandlePoll, this));
+  auto rpcs = producer_client_->rpcs;
+  auto read_rpc_handle = rpcs->Prepare();
+  if (read_rpc_handle != rpcs->InvalidHandle()) {
+    *read_rpc_handle = CreateGetChangesCDCRpc(
+        CoarseMonoClock::now() + MonoDelta::FromMilliseconds(FLAGS_cdc_read_rpc_timeout_ms),
+        nullptr, /* RemoteTablet: will get this from 'req' */
+        producer_client_->client.get(),
+        &req,
+        [=](const Status &status, cdc::GetChangesResponsePB &&new_resp) {
+          auto retained = rpcs->Unregister(read_rpc_handle);
+          auto resp = std::make_shared<cdc::GetChangesResponsePB>(std::move(new_resp));
+          WARN_NOT_OK(thread_pool_->SubmitFunc(std::bind(&CDCPoller::HandlePoll, this,
+                                                         status, resp)),
+                      "Could not submit HandlePoll to thread pool");
+        });
+    (**read_rpc_handle).SendRpc();
+  } else {
+    // Handle the Poll as a failure so repeated invocations will incur backoff.
+    WARN_NOT_OK(thread_pool_->SubmitFunc(std::bind(&CDCPoller::HandlePoll, this,
+                  STATUS(Aborted, LogPrefixUnlocked() + "InvalidHandle for GetChangesCDCRpc"),
+                  resp_)),
+                "Could not submit HandlePoll to thread pool");
+  }
 }
 
-void CDCPoller::HandlePoll() {
+void CDCPoller::HandlePoll(yb::Status status,
+                           std::shared_ptr<cdc::GetChangesResponsePB> resp) {
   RETURN_WHEN_OFFLINE();
-
-  WARN_NOT_OK(thread_pool_->SubmitFunc(std::bind(&CDCPoller::DoHandlePoll, this)),
-              "Could not submit HandlePoll to thread pool");
-}
-
-void CDCPoller::DoHandlePoll() {
-
-  RETURN_WHEN_OFFLINE();
-
   if (!should_continue_polling_()) {
     return remove_self_from_pollers_map_();
   }
 
+  std::lock_guard<std::mutex> l(data_mutex_);
+
+  status_ = status;
+  resp_ = resp;
+
   bool failed = false;
-  if (!rpc_->status().ok()) {
-    LOG(INFO) << "CDCPoller failure: " << rpc_->status().ToString();
+  if (!status_.ok()) {
+    LOG_WITH_PREFIX_UNLOCKED(INFO) << "CDCPoller failure: " << status_.ToString();
     failed = true;
   } else if (resp_->has_error()) {
-    LOG(WARNING) << "CDCPoller failure response: " << resp_->error().status().DebugString();
+    LOG_WITH_PREFIX_UNLOCKED(WARNING) << "CDCPoller failure response: code="
+                                      << resp_->error().code()
+                                      << ", status=" << resp->error().status().DebugString();
     failed = true;
   } else if (!resp_->has_checkpoint()) {
-    LOG(ERROR) << "CDCPoller failure: no checkpoint";
+    LOG_WITH_PREFIX_UNLOCKED(ERROR) << "CDCPoller failure: no checkpoint";
     failed = true;
   }
   if (failed) {
@@ -155,12 +185,14 @@ void CDCPoller::HandleApplyChanges(cdc::OutputClientResponse response) {
 
 void CDCPoller::DoHandleApplyChanges(cdc::OutputClientResponse response) {
   RETURN_WHEN_OFFLINE();
-
   if (!should_continue_polling_()) {
     return remove_self_from_pollers_map_();
   }
+
+  std::lock_guard<std::mutex> l(data_mutex_);
+
   if (!response.status.ok()) {
-    LOG(WARNING) << "ApplyChanges failure: " << response.status;
+    LOG_WITH_PREFIX_UNLOCKED(WARNING) << "ApplyChanges failure: " << response.status;
     // Repeat the ApplyChanges step, with exponential backoff
     apply_failures_ = min(apply_failures_ + 1, FLAGS_replication_failure_delay_exponent);
     int64_t delay = (1 << apply_failures_) -1;

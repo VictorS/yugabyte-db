@@ -61,6 +61,7 @@
 #include "yb/util/redis_util.h"
 #include "yb/util/size_literals.h"
 #include "yb/util/stol_utils.h"
+#include "yb/util/shared_lock.h"
 
 using yb::operator"" _MB;
 using namespace std::literals;
@@ -749,8 +750,6 @@ YB_STRONGLY_TYPED_BOOL(IsMonitorMessage);
 struct RedisServiceImplData : public RedisServiceData {
   RedisServiceImplData(RedisServer* server, string&& yb_tier_master_addresses);
 
-  constexpr static int kRpcTimeoutSec = 5;
-
   void AppendToMonitors(Connection* conn) override;
   void RemoveFromMonitors(Connection* conn) override;
   void LogToMonitors(const string& end, const string& db, const RedisClientCommand& cmd) override;
@@ -789,7 +788,7 @@ struct RedisServiceImplData : public RedisServiceData {
   // Mutex that protects the creation of client_ and populating db_to_opened_table_.
   std::mutex yb_mutex_;
   std::atomic<bool> initialized_;
-  std::unique_ptr<client::YBClient> client_;
+  client::YBClient* client_;
   SessionPool session_pool_;
   std::unordered_map<std::string, std::shared_ptr<client::YBTable>> db_to_opened_table_;
   std::shared_ptr<client::YBMetaDataCache> tables_cache_;
@@ -838,7 +837,7 @@ class BatchContextImpl : public BatchContext {
   }
 
   client::YBClient* client() const override {
-    return impl_data_->client_.get();
+    return impl_data_->client_;
   }
 
   RedisServiceImplData* service_data() override {
@@ -1127,7 +1126,7 @@ void RedisServiceImplData::RemoveFromSubscribers(
 
 std::unordered_set<string> RedisServiceImplData::GetSubscriptions(
     AsPattern type, Connection* conn) {
-  boost::shared_lock<decltype(pubsub_mutex_)> lock(pubsub_mutex_);
+  SharedLock<decltype(pubsub_mutex_)> lock(pubsub_mutex_);
   return (
       type == AsPattern::kTrue ? clients_to_subscriptions_[conn].patterns
                                : clients_to_subscriptions_[conn].channels);
@@ -1136,7 +1135,7 @@ std::unordered_set<string> RedisServiceImplData::GetSubscriptions(
 // ENG-4199: Consider getting all the cluster-wide subscriptions?
 std::unordered_set<string> RedisServiceImplData::GetAllSubscriptions(AsPattern type) {
   unordered_set<string> ret;
-  boost::shared_lock<decltype(pubsub_mutex_)> lock(pubsub_mutex_);
+  SharedLock<decltype(pubsub_mutex_)> lock(pubsub_mutex_);
   for (const auto& element :
        (type == AsPattern::kTrue ? patterns_to_clients_ : channels_to_clients_)) {
     ret.insert(element.first);
@@ -1146,7 +1145,7 @@ std::unordered_set<string> RedisServiceImplData::GetAllSubscriptions(AsPattern t
 
 // ENG-4199: Consider getting all the cluster-wide subscribers?
 int RedisServiceImplData::NumSubscribers(AsPattern type, const std::string& channel) {
-  boost::shared_lock<decltype(pubsub_mutex_)> lock(pubsub_mutex_);
+  SharedLock<decltype(pubsub_mutex_)> lock(pubsub_mutex_);
   const auto& look_in = (type ? patterns_to_clients_ : channels_to_clients_);
   const auto& iter = look_in.find(channel);
   return (iter == look_in.end() ? 0 : iter->second.size());
@@ -1155,7 +1154,7 @@ int RedisServiceImplData::NumSubscribers(AsPattern type, const std::string& chan
 void RedisServiceImplData::LogToMonitors(
     const string& end, const string& db, const RedisClientCommand& cmd) {
   {
-    boost::shared_lock<decltype(pubsub_mutex_)> rlock(pubsub_mutex_);
+    SharedLock<decltype(pubsub_mutex_)> rlock(pubsub_mutex_);
     if (monitoring_clients_.empty()) return;
   }
 
@@ -1280,7 +1279,7 @@ string PMessageFor(const string& pattern, const string& channel, const string& m
 
 int RedisServiceImplData::PublishToLocalClients(
     IsMonitorMessage mode, const string& channel, const string& message) {
-  boost::shared_lock<decltype(pubsub_mutex_)> rlock(pubsub_mutex_);
+  SharedLock<decltype(pubsub_mutex_)> rlock(pubsub_mutex_);
 
   int num_pushed_to = 0;
   // Send the message to all the monitoring clients.
@@ -1353,42 +1352,13 @@ void RedisServiceImplData::CleanUpSubscriptions(Connection* conn) {
 Status RedisServiceImplData::Initialize() {
   boost::lock_guard<std::mutex> guard(yb_mutex_);
   if (!initialized()) {
-    YBClientBuilder client_builder;
-    client_builder.set_client_name("redis_ybclient");
-    client_builder.default_rpc_timeout(MonoDelta::FromSeconds(kRpcTimeoutSec));
-    client_builder.add_master_server_addr(yb_tier_master_addresses_);
-    client_builder.set_metric_entity(server_->metric_entity());
-    client_builder.set_parent_mem_tracker(server_->mem_tracker());
-    client_builder.set_callback_threadpool_size(FLAGS_redis_callbacks_threadpool_size);
-    rpc::Messenger* messenger = nullptr;
-    if (server_->tserver() != nullptr) {
-      if (!server_->tserver()->permanent_uuid().empty()) {
-        client_builder.set_tserver_uuid(server_->tserver()->permanent_uuid());
-      }
-      messenger = server_->tserver()->messenger();
-    }
+    client_ = server_->tserver()->client();
 
-    CloudInfoPB cloud_info_pb;
-    cloud_info_pb.set_placement_cloud(FLAGS_placement_cloud);
-    cloud_info_pb.set_placement_region(FLAGS_placement_region);
-    cloud_info_pb.set_placement_zone(FLAGS_placement_zone);
-    client_builder.set_cloud_info_pb(cloud_info_pb);
-
-    client_ = VERIFY_RESULT(client_builder.Build(messenger));
-
-    // Add proxy to call local tserver if available.
-    if (server_->tserver() != nullptr) {
-      if (server_->tserver()->proxy() != nullptr) {
-        client_->SetLocalTabletServer(
-            server_->tserver()->permanent_uuid(), server_->tserver()->proxy(), server_->tserver());
-      }
-      // Set up the pub sub plumbing
-      server_->tserver()->SetPublisher(std::bind(&RedisServiceImplData::Publish, this, _1, _2));
-    }
+    server_->tserver()->SetPublisher(std::bind(&RedisServiceImplData::Publish, this, _1, _2));
 
     tables_cache_ = std::make_shared<YBMetaDataCache>(
-        client_.get(), false /* Update roles permissions cache */);
-    session_pool_.Init(client_.get(), server_->metric_entity());
+        client_, false /* Update roles permissions cache */);
+    session_pool_.Init(client_, server_->metric_entity());
 
     initialized_.store(true, std::memory_order_release);
   }

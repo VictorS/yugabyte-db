@@ -29,7 +29,7 @@ class SystemTablet : public tablet::AbstractTablet {
   SystemTablet(const Schema& schema, std::unique_ptr<YQLVirtualTable> yql_virtual_table,
                const TabletId& tablet_id);
 
-  const Schema& SchemaRef(const std::string& table_id = "") const override;
+  yb::SchemaPtr GetSchema(const std::string& table_id = "") const override;
 
   const common::YQLStorageIf& QLStorage() const override;
 
@@ -37,8 +37,9 @@ class SystemTablet : public tablet::AbstractTablet {
 
   const TabletId& tablet_id() const override;
 
-  CHECKED_STATUS RegisterReaderTimestamp(HybridTime read_point) override;
-  void UnregisterReader(HybridTime read_point) override;
+  tablet::TabletRetentionPolicy* RetentionPolicy() override {
+    return nullptr;
+  }
 
   CHECKED_STATUS HandleRedisReadRequest(CoarseTimePoint deadline,
                                         const ReadHybridTime& read_time,
@@ -77,12 +78,16 @@ class SystemTablet : public tablet::AbstractTablet {
     return IsolationLevel::NON_TRANSACTIONAL;
   }
 
+  // Decides whether the given request should go through the distributed transaction framework
+  // based on internal properties of the tablet and whether it is a YSQL request (is_ysql_request).
+  bool IsTransactionalRequest(bool is_ysql_request) const override { return false; }
+
  private:
   HybridTime DoGetSafeTime(
       tablet::RequireLease require_lease, HybridTime min_allowed,
       CoarseTimePoint deadline) const override;
 
-  Schema schema_;
+  yb::SchemaPtr schema_;
   std::unique_ptr<YQLVirtualTable> yql_virtual_table_;
   TabletId tablet_id_;
 };

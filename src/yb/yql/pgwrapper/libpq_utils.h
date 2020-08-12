@@ -18,6 +18,8 @@
 
 #include <memory>
 
+#include "yb/common/common.pb.h"
+
 #include "yb/util/net/net_util.h"
 #include "yb/util/result.h"
 
@@ -37,6 +39,8 @@ typedef std::unique_ptr<PGresult, PGResultClear> PGResultPtr;
 Result<int32_t> GetInt32(PGresult* result, int row, int column);
 
 Result<int64_t> GetInt64(PGresult* result, int row, int column);
+
+Result<double> GetDouble(PGresult* result, int row, int column);
 
 Result<std::string> GetString(PGresult* result, int row, int column);
 
@@ -68,7 +72,7 @@ class PGConn {
   PGConn(PGConn&& rhs);
   PGConn& operator=(PGConn&& rhs);
 
-  static Result<PGConn> Connect(const HostPort& host_port);
+  static Result<PGConn> Connect(const HostPort& host_port, const std::string& db_name = "");
 
   CHECKED_STATUS Execute(const std::string& command);
 
@@ -93,6 +97,13 @@ class PGConn {
     return GetValue<T>(res.get(), 0, 0);
   }
 
+  CHECKED_STATUS StartTransaction(IsolationLevel isolation_level);
+  CHECKED_STATUS CommitTransaction();
+  CHECKED_STATUS RollbackTransaction();
+
+  // Would this query use an index [only] scan?
+  Result<bool> HasIndexScan(const std::string& query);
+
   CHECKED_STATUS CopyBegin(const std::string& command);
   Result<PGResultPtr> CopyEnd();
 
@@ -105,6 +116,10 @@ class PGConn {
 
   void CopyPutString(const std::string& value) {
     CopyPut(value.c_str(), value.length());
+  }
+
+  PGconn* get() {
+    return impl_.get();
   }
 
  private:

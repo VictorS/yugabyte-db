@@ -1,16 +1,17 @@
 ---
-title: Develop
+title: Develop applications
+headerTitle: Develop
 linkTitle: Develop
-description: Develop apps on YugabyteDB
-headcontent: Get started building applications on top of YugabyteDB.
+description: Build YugabyteDB application that use ecosystem integrations and GraphQL.
+headcontent: Get started building applications based on YugabyteDB.
 image: /images/section_icons/index/develop.png
 aliases:
   - /develop/
-section: USER GUIDES
+section: YUGABYTEDB CORE
 menu:
   latest:
     identifier: develop
-    weight: 540
+    weight: 600
 
 ---
 
@@ -19,8 +20,8 @@ menu:
     <a class="section-link icon-offset" href="learn/">
       <div class="head">
         <img class="icon" src="/images/section_icons/develop/learn.png" aria-hidden="true" />
-        <div class="articles">6 articles</div>
-        <div class="title">Learn application development</div>
+        <div class="articles">9 articles</div>
+        <div class="title">Learn app development</div>
       </div>
       <div class="body">
         Learn how to build cloud services and applications on YugabyteDB.
@@ -58,11 +59,11 @@ menu:
     <a class="section-link icon-offset" href="graphql/">
       <div class="head">
         <img class="icon" src="/images/section_icons/develop/real-world-apps.png" aria-hidden="true" />
-        <div class="articles">3 articles</div>
-        <div class="title">Work with GraphQL</div>
+        <div class="articles">2 articles</div>
+        <div class="title">Build GraphQL applications</div>
       </div>
       <div class="body">
-        Use Hasura GraphQL Engine and Prisma to explore using GraphQL with YugabyteDB databases.
+        Use Hasura GraphQL Engine and Prisma to use GraphQL with YugabyteDB.
       </div>
     </a>
   </div>
@@ -72,10 +73,23 @@ menu:
       <div class="head">
         <img class="icon" src="/images/section_icons/develop/real-world-apps.png" aria-hidden="true" />
         <div class="articles">3 articles</div>
-        <div class="title">Explore sample applications</div>
+        <div class="title">Explore sample apps</div>
       </div>
       <div class="body">
         A walk-through of real world, end-to-end applications build on top of YugabyteDB.
+      </div>
+    </a>
+  </div>
+
+  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
+    <a class="section-link icon-offset" href="best-practices/">
+      <div class="head">
+        <img class="icon" src="/images/section_icons/develop/real-world-apps.png" aria-hidden="true" />
+        <div class="articles">3 articles</div>
+        <div class="title">Best practices</div>
+      </div>
+      <div class="body">
+        Best practices for data modeling and cluster configuration.
       </div>
     </a>
   </div>

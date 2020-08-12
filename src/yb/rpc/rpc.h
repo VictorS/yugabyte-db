@@ -116,12 +116,15 @@ class RpcRetrier {
       RpcCommand* rpc, const Status& why_status,
       BackoffStrategy strategy = BackoffStrategy::kLinear);
 
+  CHECKED_STATUS DelayedRetry(
+      RpcCommand* rpc, const Status& why_status, MonoDelta add_delay);
+
   RpcController* mutable_controller() { return &controller_; }
   const RpcController& controller() const { return controller_; }
 
   // Sets up deadline and returns controller.
   // Do not forget that setting deadline in RpcController is NOT thread safe.
-  RpcController* PrepareController(MonoDelta single_call_timeout);
+  RpcController* PrepareController();
 
   CoarseTimePoint deadline() const { return deadline_; }
 
@@ -144,11 +147,16 @@ class RpcRetrier {
   }
 
  private:
+  CHECKED_STATUS DoDelayedRetry(RpcCommand* rpc, const Status& why_status);
+
   // Called when an RPC comes up for retrying. Actually sends the RPC.
   void DoRetry(RpcCommand* rpc, const Status& status);
 
   // The next sent rpc will be the nth attempt (indexed from 1).
   int attempt_num_ = 1;
+
+  // Delay used for the last DelayedRetry. Depends on argument history of DelayedRetry calls.
+  MonoDelta retry_delay_ = MonoDelta::kZero;
 
   const CoarseTimePoint start_;
 
@@ -200,8 +208,8 @@ class Rpc : public RpcCommand {
  protected:
   const RpcRetrier& retrier() const { return retrier_; }
   RpcRetrier* mutable_retrier() { return &retrier_; }
-  RpcController* PrepareController(MonoDelta single_call_timeout = MonoDelta()) {
-    return retrier_.PrepareController(single_call_timeout);
+  RpcController* PrepareController() {
+    return retrier_.PrepareController();
   }
 
  private:
@@ -226,7 +234,7 @@ class Rpcs {
   void Shutdown();
   Handle Register(RpcCommandPtr call);
   void Register(RpcCommandPtr call, Handle* handle);
-  void RegisterAndStart(RpcCommandPtr call, Handle* handle);
+  bool RegisterAndStart(RpcCommandPtr call, Handle* handle);
   RpcCommandPtr Unregister(Handle* handle);
   void Abort(std::initializer_list<Handle*> list);
   // Request all active calls to abort.

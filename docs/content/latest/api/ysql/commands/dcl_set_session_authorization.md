@@ -1,7 +1,8 @@
 ---
-title: SET SESSION AUTHORIZATION
-description: SET SESSION AUTHORIZATION
-summary: Roles (users and groups)
+title: SET SESSION AUTHORIZATION statement [YSQL]
+headerTitle: SET SESSION AUTHORIZATION
+linkTitle: SET SESSION AUTHORIZATION
+description: Use the SET SESSION AUTHORIZATION statement to set the current user and session user of the current session to be the specified user.
 menu:
   latest:
     identifier: api-ysql-commands-set-session-authorization
@@ -14,7 +15,7 @@ showAsideToc: true
 
 ## Synopsis
 
-`SET SESSION AUTHORIZATION` sets the current user and session user of the current session to be the specified user.
+Use the `SET SESSION AUTHORIZATION` statement to set the current user and session user of the current session to be the specified user.
 
 ## Syntax
 
@@ -70,7 +71,6 @@ yugabyte=# select session_user, current_user;
 
 ## See also
 
-[`CREATE ROLE`](../dcl_create_role)
-[`GRANT`](../dcl_grant)
-[`REVOKE`](../dcl_revoke)
-[Other YSQL Statements](..)
+- [`CREATE ROLE`](../dcl_create_role)
+- [`GRANT`](../dcl_grant)
+- [`REVOKE`](../dcl_revoke)

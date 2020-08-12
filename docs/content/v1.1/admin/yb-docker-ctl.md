@@ -2,6 +2,7 @@
 title: yb-docker-ctl
 linkTitle: yb-docker-ctl
 description: yb-docker-ctl
+block_indexing: true
 menu:
   v1.1:
     identifier: yb-docker-ctl
@@ -20,7 +21,7 @@ $ mkdir ~/yugabyte && cd ~/yugabyte
 ```
 
 ```sh
-$ wget https://downloads.yugabyte.com/yb-docker-ctl && chmod +x yb-docker-ctl
+$ wget https://raw.githubusercontent.com/yugabyte/yugabyte-db/master/bin/yb-docker-ctl && chmod +x yb-docker-ctl
 ```
 
 

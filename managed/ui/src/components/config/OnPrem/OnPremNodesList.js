@@ -1,13 +1,14 @@
 // Copyright (c) YugaByte, Inc.
 
+import _ from 'lodash';
 import React, { Component } from 'react';
 import { Row, Col, Alert } from 'react-bootstrap';
 import { BootstrapTable, TableHeaderColumn } from 'react-bootstrap-table';
 import { FieldArray } from 'redux-form';
-import { withRouter } from 'react-router';
+import { Link, withRouter } from 'react-router';
 
-import { getPromiseState } from 'utils/PromiseUtils';
-import { isNonEmptyObject, isNonEmptyArray } from 'utils/ObjectUtils';
+import { getPromiseState } from '../../../utils/PromiseUtils';
+import { isNonEmptyObject, isNonEmptyArray } from '../../../utils/ObjectUtils';
 import { YBButton, YBModal } from '../../common/forms/fields';
 import InstanceTypeForRegion from '../OnPrem/wizard/InstanceTypeForRegion';
 import { YBBreadcrumb } from '../../common/descriptors';
@@ -72,16 +73,20 @@ class OnPremNodesList extends Component {
           if (isNonEmptyObject(val) && isNonEmptyString(val.zone)) {
             const currentZone = val.zone.trim();
             const currentZoneUUID = zoneList[region][currentZone];
+            const instanceNames = val.instanceNames.split(",");
             acc[currentZoneUUID] = acc[currentZoneUUID] || [];
             if (val.instanceTypeIPs) {
-              val.instanceTypeIPs.split(",").forEach((ip) => {
+              val.instanceTypeIPs.split(",").forEach((ip, index) => {
                 acc[currentZoneUUID].push({
                   zone: currentZone,
                   region: region,
                   ip: ip.trim(),
                   instanceType: val.machineType,
                   sshUser: isNonEmptyObject(currentCloudAccessKey) ?
-                    currentCloudAccessKey.keyInfo.sshUser : ""
+                    currentCloudAccessKey.keyInfo.sshUser : "",
+                  sshPort: isNonEmptyObject(currentCloudAccessKey) ?
+                    currentCloudAccessKey.keyInfo.sshPort : null,
+                  instanceName: instanceNames[index]
                 });
               });
             }
@@ -109,7 +114,33 @@ class OnPremNodesList extends Component {
     this.props.reset();
   };
 
-  componentWillMount() {
+  handleCheckNodesUsage = (data, row) => {
+    const { universeList } = this.props;
+    if (data && getPromiseState(universeList).isSuccess()) {
+      const result = universeList.data.find(u => {
+        const nodes = u.universeDetails.nodeDetailsSet;
+        if (nodes) {
+          return !!nodes.find(n => n.azUuid === row.zoneUuid ||
+            (n.nodeUuid && n.nodeUuid === row.nodeUuid));
+        }
+        return false;
+      });
+      if (result) {
+        return (
+          <Link to={`/universes/${result.universeUUID}`}>
+            {result.name}
+          </Link>
+        );
+      }
+    }
+    return data;
+  }
+
+  UNSAFE_componentWillMount() {
+    const { universeList } = this.props;
+    if (!getPromiseState(universeList).isSuccess()) {
+      this.props.fetchUniverseList();
+    }
     // Get OnPrem provider if provider list is already loaded during component load
     const onPremProvider = this.props.cloud.providers.data.find((provider)=>provider.code === "onprem");
     this.props.getRegionListItems(onPremProvider.uuid);
@@ -117,18 +148,31 @@ class OnPremNodesList extends Component {
   }
 
   render() {
-    const {cloud: {nodeInstanceList, instanceTypes, supportedRegionList, accessKeys, providers}, handleSubmit, showProviderView, visibleModal } = this.props;
+    const {
+      cloud: {
+        nodeInstanceList,
+        instanceTypes,
+        supportedRegionList,
+        accessKeys,
+        providers
+      },
+      handleSubmit,
+      showProviderView,
+      visibleModal
+    } = this.props;
     const self = this;
     let nodeListItems = [];
     if (getPromiseState(nodeInstanceList).isSuccess()) {
       nodeListItems = nodeInstanceList.data.map(function(item) {
         return {
-          nodeId: item.nodeUuID,
+          nodeId: item.nodeUuid,
           inUse: item.inUse,
           ip: item.details.ip,
           instanceType: item.details.instanceType,
           region: item.details.region,
-          zone: item.details.zone
+          zone: item.details.zone,
+          zoneUuid: item.zoneUuid,
+          instanceName: item.instanceName
         };
       });
     }
@@ -144,7 +188,9 @@ class OnPremNodesList extends Component {
 
     let provisionMessage = <span />;
     const onPremProvider = providers.data.find((provider)=>provider.code === "onprem");
+    let useHostname = false;
     if (isDefinedNotNull(onPremProvider)) {
+      useHostname = _.get(onPremProvider, 'config.USE_HOSTNAME', false) === 'true';
       const onPremKey = accessKeys.data.find((accessKey) => accessKey.idKey.providerUUID === onPremProvider.uuid);
       if (isDefinedNotNull(onPremKey) && onPremKey.keyInfo.airGapInstall) {
         provisionMessage = (
@@ -174,12 +220,16 @@ class OnPremNodesList extends Component {
             <div className="instance-region-type">{regionItem.code}</div>
             <div className="form-field-grid">
               <FieldArray name={`instances.${regionItem.code}`} component={InstanceTypeForRegion}
-                          zoneOptions={zoneOptions} machineTypeOptions={machineTypeOptions} formType={"modal"}/>
+                          zoneOptions={zoneOptions} machineTypeOptions={machineTypeOptions} useHostname={useHostname} formType={"modal"}/>
             </div>
           </div>
         );
       }) : null;
-
+    const deleteConfirmationText = `Are you sure you want to delete node${isNonEmptyObject(this.state.nodeToBeDeleted)
+      && this.state.nodeToBeDeleted.nodeName
+      ? ' ' + this.state.nodeToBeDeleted.nodeName
+      : ''}?`;
+    const modalAddressSpecificText = useHostname ? "hostnames" : "IP addresses";
     return (
       <div>
         <span className="buttons pull-right">
@@ -197,8 +247,9 @@ class OnPremNodesList extends Component {
           <Col xs={12}>
             <BootstrapTable data={nodeListItems} >
               <TableHeaderColumn dataField="nodeId" isKey={true} hidden={true} />
-              <TableHeaderColumn dataField="ip">IP</TableHeaderColumn>
-              <TableHeaderColumn dataField="inUse">In Use</TableHeaderColumn>
+              <TableHeaderColumn dataField="instanceName">Identifier</TableHeaderColumn>
+              <TableHeaderColumn dataField="ip">Address</TableHeaderColumn>
+              <TableHeaderColumn dataField="inUse" dataFormat={this.handleCheckNodesUsage}>In Use</TableHeaderColumn>
               <TableHeaderColumn dataField="region">Region</TableHeaderColumn>
               <TableHeaderColumn dataField="zone">Zone</TableHeaderColumn>
               <TableHeaderColumn dataField="instanceType">Instance Type</TableHeaderColumn>
@@ -208,17 +259,16 @@ class OnPremNodesList extends Component {
         </Row>
         <YBModal title={"Add Instances"} formName={"AddNodeForm"} visible={visibleModal === "AddNodesForm"}
                  onHide={this.hideAddNodeModal} onFormSubmit={handleSubmit(this.submitAddNodesForm)}
-                 showCancelButton={true} submitLabel="Add">
+                 showCancelButton={true} submitLabel="Add" size="large">
           <div className="on-prem-form-text">
-            Enter IP addresses for the instances of each availability zone and instance type.
+            {`Enter ${modalAddressSpecificText} for the instances of each availability zone and instance type.`}
           </div>
           {regionFormTemplate}
         </YBModal>
-
         <YBConfirmModal name={"confirmDeleteNodeInstance"} title={"Delete Node"} hideConfirmModal={this.hideDeleteNodeModal}
                         currentModal={"confirmDeleteNodeInstance"} visibleModal={visibleModal}
                         onConfirm={this.deleteInstance} confirmLabel={"Delete"} cancelLabel={"Cancel"}>
-          Are you sure you want to delete node {isNonEmptyObject(this.state.nodeToBeDeleted) ? this.state.nodeToBeDeleted.nodeName : ""}
+          {deleteConfirmationText}
         </YBConfirmModal>
       </div>
     );

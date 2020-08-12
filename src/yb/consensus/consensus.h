@@ -33,6 +33,7 @@
 #define YB_CONSENSUS_CONSENSUS_H_
 
 #include <iosfwd>
+#include <ostream>
 #include <memory>
 #include <string>
 #include <vector>
@@ -83,12 +84,11 @@ class TabletServerErrorPB;
 
 namespace consensus {
 
-class ConsensusCommitContinuation;
-class ReplicaOperationFactory;
-
 typedef int64_t ConsensusTerm;
 
-typedef std::function<void(const Status& status, int64_t leader_term)> ConsensusReplicatedCallback;
+typedef std::function<void(
+    const Status& status, int64_t leader_term, OpIds* applied_op_ids)>
+        ConsensusReplicatedCallback;
 
 // After completing bootstrap, some of the results need to be plumbed through
 // into the consensus implementation.
@@ -96,10 +96,14 @@ struct ConsensusBootstrapInfo {
   ConsensusBootstrapInfo();
 
   // The id of the last operation in the log
-  OpId last_id;
+  OpIdPB last_id;
 
   // The id of the last committed operation in the log.
-  OpId last_committed_id;
+  OpIdPB last_committed_id;
+
+  // The id of the split operation designated for this tablet added to Raft log.
+  // See comments for ReplicateState::split_op_id_.
+  OpIdPB split_op_id;
 
   // REPLICATE messages which were in the log with no accompanying
   // COMMIT. These need to be passed along to consensus init in order
@@ -135,13 +139,15 @@ struct LeaderElectionData {
   //    If this is specified, we would wait until this entry is committed. If not specified
   //    (i.e. if this has the default OpId value) it is taken from the last call to StartElection
   //    with pending_commit = true.
-  OpId must_be_committed_opid = OpId::default_instance();
+  OpIdPB must_be_committed_opid = OpIdPB::default_instance();
 
   // originator_uuid - if election is initiated by an old leader as part of a stepdown procedure,
   //    this would contain the uuid of the old leader.
   std::string originator_uuid = std::string();
 
   TEST_SuppressVoteRequest suppress_vote_request = TEST_SuppressVoteRequest::kFalse;
+
+  std::string ToString() const;
 };
 
 // The external interface for a consensus peer.
@@ -278,9 +284,12 @@ class Consensus {
 
   // Returns the leader status (see LeaderStatus type description for details).
   // If leader is ready, then also returns term, otherwise OpId::kUnknownTerm is returned.
-  virtual LeaderState GetLeaderState() const = 0;
+  //
+  // allow_stale could be used to avoid refreshing cache, when we are OK to read slightly outdated
+  // value.
+  virtual LeaderState GetLeaderState(bool allow_stale = false) const = 0;
 
-  LeaderStatus GetLeaderStatus() const;
+  LeaderStatus GetLeaderStatus(bool allow_stale = false) const;
   int64_t LeaderTerm() const;
 
   // Returns the uuid of this peer.
@@ -321,6 +330,10 @@ class Consensus {
 
   virtual yb::OpId GetLastCommittedOpId() = 0;
 
+  // Return the ID of the split operation requesting to split this Raft group if it has been added
+  // to Raft log and uninitialized OpId otherwise.
+  virtual yb::OpId GetSplitOpId() = 0;
+
   // Assuming we are the leader, wait until we have a valid leader lease (i.e. the old leader's
   // lease has expired, and we have replicated a new lease that has not expired yet).
   virtual CHECKED_STATUS WaitForLeaderLeaseImprecise(MonoTime deadline) = 0;
@@ -339,12 +352,11 @@ class Consensus {
   virtual MicrosTime MajorityReplicatedHtLeaseExpiration(
       MicrosTime min_allowed, CoarseTimePoint deadline) const = 0;
 
-  // This includes heartbeats too.
-  virtual MonoTime TimeSinceLastMessageFromLeader() = 0;
-
   // Read majority replicated messages for CDC producer.
-  virtual CHECKED_STATUS ReadReplicatedMessagesForCDC(const OpId& from, ReplicateMsgs* msgs,
-                                                      bool* have_more_messages) = 0;
+  virtual Result<ReadOpsResult> ReadReplicatedMessagesForCDC(const yb::OpId& from,
+                                                             int64_t* repl_index) = 0;
+
+  virtual void UpdateCDCConsumerOpId(const yb::OpId& op_id) = 0;
 
  protected:
   friend class RefCountedThreadSafe<Consensus>;
@@ -498,7 +510,7 @@ class ConsensusRound : public RefCountedThreadSafe<ConsensusRound> {
 
   // Returns the id of the (replicate) operation this context
   // refers to. This is only set _after_ Consensus::Replicate(context).
-  OpId id() const {
+  OpIdPB id() const {
     return replicate_msg_->id();
   }
 
@@ -520,7 +532,8 @@ class ConsensusRound : public RefCountedThreadSafe<ConsensusRound> {
   }
 
   // If a continuation was set, notifies it that the round has been replicated.
-  void NotifyReplicationFinished(const Status& status, int64_t leader_term);
+  void NotifyReplicationFinished(
+      const Status& status, int64_t leader_term, OpIds* applied_op_ids);
 
   // Binds this round such that it may not be eventually executed in any term
   // other than 'term'.

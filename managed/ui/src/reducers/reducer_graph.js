@@ -11,10 +11,7 @@ const INITIAL_STATE = {graphFilter: DEFAULT_GRAPH_FILTER, metrics: {},
 export default function(state = INITIAL_STATE, action) {
   switch(action.type) {
     case CHANGE_GRAPH_QUERY_PERIOD:
-      const filters = {};
-      Object.keys(action.payload).forEach(function(key, idx){
-        filters[key] = action.payload[key];
-      });
+      const filters = {...action.payload};      
       return { ...state, graphFilter: filters};
     case RESET_GRAPH_QUERY_PERIOD:
       return { ...state, graphFilter: null};
@@ -30,7 +27,7 @@ export default function(state = INITIAL_STATE, action) {
     case QUERY_METRICS_FAILURE:
       metricData = state.metrics;
       metricData[action.panelType] = {};
-      return { ...state, metrics: metricData, error: action.payload,
+      return { ...state, metrics: metricData, error: action.payload.response,
         loading: false};
     case RESET_METRICS:
       return { ...state, metrics: {}, loading: false, panelType: null};

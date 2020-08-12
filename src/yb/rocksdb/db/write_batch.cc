@@ -704,7 +704,9 @@ class MemTableInserter : public WriteBatch::Handler {
       return seek_status;
     }
     MemTable* mem = cf_mems_->GetMemTable();
-    if (insert_flags_.Test(InsertFlag::kInMemoryErase) && mem->Erase(key)) {
+    if ((delete_type == ValueType::kTypeSingleDeletion ||
+         delete_type == ValueType::kTypeColumnFamilySingleDeletion) &&
+        mem->Erase(key)) {
       return Status::OK();
     }
     auto* moptions = mem->GetMemTableOptions();
@@ -781,7 +783,7 @@ class MemTableInserter : public WriteBatch::Handler {
       if (cf_handle == nullptr) {
         cf_handle = db_->DefaultColumnFamily();
       }
-      db_->Get(read_options, cf_handle, key, &get_value);
+      RETURN_NOT_OK(db_->Get(read_options, cf_handle, key, &get_value));
       Slice get_value_slice = Slice(get_value);
 
       // 2) Apply this merge

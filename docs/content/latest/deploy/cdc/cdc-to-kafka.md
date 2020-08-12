@@ -1,8 +1,9 @@
 ---
-title: CDC to Kafka
+title: Use change data capture (CDC) to Kafka
+headerTitle: Change data capture (CDC) to Kafka
 linkTitle: CDC to Kafka
-description: Change data capture (CDC) to Kafka
-beta: /faq/product/#what-is-the-definition-of-the-beta-feature-tag
+description: Learn how to use change data capture (CDC) API to send data changes to Apache Kafka.
+beta: /latest/faq/general/#what-is-the-definition-of-the-beta-feature-tag
 menu:
   latest:
     parent: cdc
@@ -13,17 +14,17 @@ isTocNested: true
 showAsideToc: true
 ---
 
-Follow the steps below to connect a local YugabyteDB cluster to use the Change Data Capture (CDC) API to send data changes to Apache Kafka. To learn about the change data capture (CDC) architecture, see [Change data capture (CDC)](../architecture/cdc-architecture).
+Follow the steps below to connect a YugabyteDB cluster to use the Change Data Capture (CDC) API to send data changes to Apache Kafka. To learn about the change data capture (CDC) architecture, see [Change data capture (CDC)](../../../architecture/cdc-architecture).
 
 ## Prerequisites
 
 ### YugabyteDB
 
-A 1-node YugabyteDB cluster with RF of 1 is up and running locally (the `yb-ctl create` command create this by default). If you are new to YugabyteDB, you can create a local YugaByte cluster in under five minutes by following the steps in the [Quick start](/quick-start/install/).
+Create a YugabyteDB cluster using the steps outlined in [Manual Deployment](../../manual-deployment/).
 
 ### Java
 
-A JRE (or JDK), for Java 8 or 11, is installed. JDK and JRE installers for Linux, macOS, and Windows can be downloaded from [OpenJDK](http://jdk.java.net/), [AdoptOpenJDK](https://adoptopenjdk.net/), or [Azul Systems](https://www.azul.com/downloads/zulu-community/).
+A JRE (or JDK), for Java 8 or 11, is installed. 
 
 {{< note title="Note" >}}
 
@@ -37,7 +38,7 @@ A local install of the Confluent Platform should be up and running. The [Conflue
 
 To get a local Confluent Platform (with Apache Kafka) up and running quickly, follow the steps in the [Confluent Platform Quick Start (Local)](https://docs.confluent.io/current/quickstart/ce-quickstart.html#ce-quickstart).
 
-## Step 1 — Add the `users` table
+## 1. Create the source table
 
 With your local YugabyteDB cluster running, create a table, called `users`, in the default database (`yugabyte`).
 
@@ -45,9 +46,9 @@ With your local YugabyteDB cluster running, create a table, called `users`, in t
 CREATE TABLE users (name text, pass text, id int, primary key (id));
 ```
 
-## Step 2 — Create Avro schemas
+## 2. Create Avro schemas
 
-The Yugabyte CDC connector supports the use of [Apache Avro schemas](http://avro.apache.org/docs/current/#schemas) to serialize and deserialize tables. You can use the [Schema Registry](https://docs.confluent.io/current/schema-registry/index.html) in the Confluent Platform to create and manage Avro schema files. For a step-by-step tutorial, see [Schema Registry Tutorial](https://docs.confluent.io/current/schema-registry/schema_registry_tutorial.html).
+The Kafka Connect YugabyteDB Source Connector supports the use of [Apache Avro schemas](http://avro.apache.org/docs/current/#schemas) to serialize and deserialize tables. You can use the [Schema Registry](https://docs.confluent.io/current/schema-registry/index.html) in the Confluent Platform to create and manage Avro schema files. For a step-by-step tutorial, see [Schema Registry Tutorial](https://docs.confluent.io/current/schema-registry/schema_registry_tutorial.html).
 
 Create two Avro schemas, one for the `users` table and one for the primary key of the table. After this step, you should have two files: `table_schema_path.avsc` and `primary_key_schema_path.avsc`.
 
@@ -81,7 +82,7 @@ You can use the following two Avro schema examples that will work with the `user
 }
 ```
 
-## Step 3 — Start the Apache Kafka services
+## 3. Start the Apache Kafka services
 
 1. Create a Kafka topic.
 
@@ -95,24 +96,35 @@ You can use the following two Avro schema examples that will work with the `user
     bin/kafka-avro-console-consumer --bootstrap-server localhost:9092 --topic users_topic --key-deserializer=io.confluent.kafka.serializers.KafkaAvroDeserializer     --value-deserializer=io.confluent.kafka.serializers.KafkaAvroDeserializer
     ```
 
-## Step 4 — Download the Yugabyte CDC connector
+## 4. Download the Kafka Connect YugabyteDB Source Connector
 
-Download the [Yugabyte CDC connector (JAR file)](https://github.com/yugabyte/yb-kafka-connector/blob/master/yb-cdc/yb-cdc-connector.jar).
-
-## Step 5 — Log to Kafka
-
-Run the following command to start logging an output stream of data changes from YugabyteDB to Apache Kafka.
+Download the Kafka Connect YugabyteDB Source Connector JAR file (`yb-cdc-connector.jar`).
 
 ```sh
-java -jar target/yb_cdc_connector.jar
---table_name yugabyte.cdc
---topic_name cdc-test
---table_schema_path table_schema_path.avsc
+$ wget -O yb-cdc-connector.jar https://github.com/yugabyte/yb-kafka-connector/blob/master/yb-cdc/yb-cdc-connector.jar?raw=true
+
+```
+
+## 5. Log to Kafka
+
+Run the following command to start logging an output stream of data changes from the YugabyteDB `cdc` table to Apache Kafka.
+
+```sh
+java -jar yb-cdc-connector.jar \
+--table_name yugabyte.cdc \
+--topic_name cdc-test \
+--table_schema_path table_schema_path.avsc \
 --primary_key_schema_path primary_key_schema_path.avsc
 ```
 
-For details on the available options, see [Using the Yugabyte CDC connector](./use-cdc).
+The example above uses the following parameters:
 
-## Step 6 — Write values and observe
+- `--table_name` — Specifies the namespace and table, where namespace is the database (YSQL) or keyspace (YCQL).
+- `--master_addrs` — Specifies the IP addresses for all of the YB-Master servers that are producing or consuming. Default value is `127.0.0.1:7100`. If you are using a 3-node local cluster, then you need to specify a comma-delimited list of the addresses for all of your YB-Master servers.
+- `topic_name` — Specifies the Apache Kafka topic name.
+- `table_schema_path` — Specifies the location of the Avro file (`.avsc`) for the table schema.
+- `primary_key_schema_path` — Specifies the location of the Avro file (`.avsc`) for the primary key schema.
+
+## 6. Write values and observe
 
 In another window, write values to the table and observe the values on your Kafka output stream.

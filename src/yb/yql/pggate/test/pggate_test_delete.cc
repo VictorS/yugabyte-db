@@ -31,10 +31,11 @@ TEST_F(PggateTestDelete, TestDelete) {
 
   // Create table in the connected database.
   int col_count = 0;
-  CHECK_YBC_STATUS(YBCPgNewCreateTable(pg_session_, kDefaultDatabase, kDefaultSchema, tabname,
+  CHECK_YBC_STATUS(YBCPgNewCreateTable(kDefaultDatabase, kDefaultSchema, tabname,
                                        kDefaultDatabaseOid, tab_oid,
                                        false /* is_shared_table */, true /* if_not_exist */,
-                                       false /* add_primary_key */, &pg_stmt));
+                                       false /* add_primary_key */, true /* colocated */,
+                                       kInvalidOid /*tablegroup_id*/, &pg_stmt));
   CHECK_YBC_STATUS(YBCTestCreateTableAddColumn(pg_stmt, "hash_key", ++col_count,
                                              DataType::INT64, true, true));
   CHECK_YBC_STATUS(YBCTestCreateTableAddColumn(pg_stmt, "id", ++col_count,
@@ -48,13 +49,12 @@ TEST_F(PggateTestDelete, TestDelete) {
   CHECK_YBC_STATUS(YBCTestCreateTableAddColumn(pg_stmt, "job", ++col_count,
                                              DataType::STRING, false, false));
   CHECK_YBC_STATUS(YBCPgExecCreateTable(pg_stmt));
-  CHECK_YBC_STATUS(YBCPgDeleteStatement(pg_stmt));
   CommitTransaction();
   pg_stmt = nullptr;
 
   // INSERT ----------------------------------------------------------------------------------------
   // Allocate new insert.
-  CHECK_YBC_STATUS(YBCPgNewInsert(pg_session_, kDefaultDatabaseOid, tab_oid,
+  CHECK_YBC_STATUS(YBCPgNewInsert(kDefaultDatabaseOid, tab_oid,
                                   false /* is_single_row_txn */, &pg_stmt));
 
   // Allocate constant expressions.
@@ -103,13 +103,12 @@ TEST_F(PggateTestDelete, TestDelete) {
     YBCPgUpdateConstChar(expr_job, job.c_str(), job.size(), false);
   }
 
-  CHECK_YBC_STATUS(YBCPgDeleteStatement(pg_stmt));
   CommitTransaction();
   pg_stmt = nullptr;
 
   // DELETE ----------------------------------------------------------------------------------------
   // Allocate new delete.
-  CHECK_YBC_STATUS(YBCPgNewDelete(pg_session_, kDefaultDatabaseOid, tab_oid,
+  CHECK_YBC_STATUS(YBCPgNewDelete(kDefaultDatabaseOid, tab_oid,
                                   false /* is_single_row_txn */, &pg_stmt));
 
   // Allocate constant expressions.
@@ -136,14 +135,13 @@ TEST_F(PggateTestDelete, TestDelete) {
     YBCPgUpdateConstInt4(expr_id, seed, false);
   }
 
-  CHECK_YBC_STATUS(YBCPgDeleteStatement(pg_stmt));
   CommitTransaction();
   pg_stmt = nullptr;
 
   // SELECT ----------------------------------------------------------------------------------------
   LOG(INFO) << "Test SELECTing from non-partitioned table";
-  CHECK_YBC_STATUS(YBCPgNewSelect(pg_session_, kDefaultDatabaseOid, tab_oid, kInvalidOid,
-                                  true /* prevent_restart */, &pg_stmt));
+  CHECK_YBC_STATUS(YBCPgNewSelect(kDefaultDatabaseOid, tab_oid,
+                                  NULL /* prepare_params */, &pg_stmt));
 
   // Specify the selected expressions.
   YBCPgExpr colref;
@@ -201,7 +199,6 @@ TEST_F(PggateTestDelete, TestDelete) {
   }
   CHECK_EQ(select_row_count, insert_row_count - delete_row_count) << "Unexpected row count";
 
-  CHECK_YBC_STATUS(YBCPgDeleteStatement(pg_stmt));
   pg_stmt = nullptr;
 }
 

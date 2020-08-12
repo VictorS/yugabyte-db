@@ -1,8 +1,8 @@
 ---
-title: DROP DATABASE
+title: DROP DATABASE statement [YSQL]
+headerTitle: DROP DATABASE
 linkTitle: DROP DATABASE
-summary: Remove a database
-description: DROP DATABASE
+description: Use the DROP DATABASE statement to remove a database and all of its associated objects from the system. 
 menu:
   latest:
     identifier: api-ysql-commands-drop-database
@@ -15,7 +15,7 @@ showAsideToc: true
 
 ## Synopsis
 
-Use the `DROP DATABASE` statement to remove a database and all of its associated objects from the system. This is an irreversible stement. A currently-open connection to the database will be invalidated and then closed as soon as the statement is executed using that connection.
+Use the `DROP DATABASE` statement to remove a database and all of its associated objects from the system. This is an irreversible statement. A currently-open connection to the database will be invalidated and then closed as soon as the statement is executed using that connection.
 
 ## Syntax
 

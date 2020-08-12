@@ -236,7 +236,7 @@ inline MonoTime& operator-=(MonoTime& lhs, const MonoDelta& rhs) { // NOLINT
 inline MonoTime operator-(const MonoTime& lhs, const MonoDelta& rhs) {
   MonoTime result = lhs;
   result.AddDelta(-rhs);
-  return MonoTime(lhs);
+  return MonoTime(result);
 }
 
 inline bool operator<(const MonoTime& lhs, const MonoTime& rhs) {
@@ -263,6 +263,8 @@ class CoarseMonoClock {
   typedef duration Duration;
   typedef std::chrono::time_point<CoarseMonoClock> time_point;
   typedef time_point TimePoint;
+
+  static constexpr bool is_steady = true;
 
   static time_point now();
   static TimePoint Now() { return now(); }

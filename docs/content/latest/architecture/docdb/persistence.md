@@ -1,7 +1,8 @@
 ---
-title: Persistence
+title: Persistence in YugabyteDB
+headerTitle: Persistence
 linkTitle: Persistence
-description: Persistence on top of RocksDB
+description: Learn how DocDB manages persistence using a RocksDB-based storage layer.
 aliases:
   - /latest/architecture/docdb/persistence/
   - /latest/architecture/concepts/persistence/
@@ -27,7 +28,7 @@ The keys and the corresponding document values are described below.
 
 ### DocDB key
 
-The **keys** in DocDB document model are compound keys consisting of 1 or more **hash organized components**, followed by 0 or more **ordered (range) components**. These components are stored in their data type specific sort order; both ascending and descending sort order is supported for each ordered component of the key.
+The **keys** in DocDB document model are compound keys consisting of one or more **hash organized components**, followed by zero or more **ordered (range) components**. These components are stored in their data type specific sort order; both ascending and descending sort order is supported for each ordered component of the key.
 
 ### DocDB value
 
@@ -58,11 +59,11 @@ DocumentKey1 = {
 }
 ```
 
-Keys we store in RocksDB consist of a number of components, where the first component is a "document
+Keys stored in RocksDB consist of a number of components, where the first component is a "document
 key", followed by a few scalar components, and finally followed by a MVCC timestamp (sorted in
 reverse order). Each component in the DocumentKey, SubKey, and Value, are PrimitiveValues, which are
-just (type, value) pairs, which can be encoded to and decoded from strings. When we encode primitive
-values in keys, we use a binary-comparable encoding for the value, so that sort order of the
+just (type, value) pairs, which can be encoded to and decoded from strings. When encoding primitive
+values in keys, a binary-comparable encoding is used for the value, so that sort order of the
 encoding is the same as the sort order of the value.
 
 #### Updates and deletes
@@ -109,7 +110,7 @@ with the value using the same encoding as Redis. The Table TTL is not stored in 
 in master’s syscatalog as part of the table’s schema). If no TTL is present at the column’s value,
 the table TTL acts as the default value.
 
-Furthermore, CQL has a distinction between rows created using Insert vs Update. We keep track of
+Furthermore, YCQL has a distinction between rows created using Insert vs Update. We keep track of
 this difference (and row level TTLs) using a "liveness column", a special system column invisible to
 the user. It is added for inserts, but not updates: making sure the row is present even if all
 non-primary key columns are deleted only in the case of inserts.

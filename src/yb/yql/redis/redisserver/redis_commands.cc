@@ -176,11 +176,10 @@ BOOST_PP_SEQ_FOR_EACH(DEFINE_HISTOGRAM, ~, REDIS_COMMANDS)
 BOOST_PP_SEQ_FOR_EACH(PARSER_FORWARD, ~, REDIS_COMMANDS)
 
 YBTableName RedisServiceData::GetYBTableNameForRedisDatabase(const string& db_name) {
-  if (db_name == "0") {
-    return YBTableName(common::kRedisKeyspaceName, common::kRedisTableName);
-  } else {
-    return YBTableName(common::kRedisKeyspaceName, StrCat(common::kRedisTableName, "_", db_name));
-  }
+  return YBTableName(YQL_DATABASE_REDIS,
+                     common::kRedisKeyspaceName,
+                     db_name == "0" ? string(common::kRedisTableName)
+                                    : StrCat(common::kRedisTableName, "_", db_name));
 }
 
 namespace {
@@ -315,9 +314,9 @@ void GetTabletLocations(LocalCommandData data, RedisArrayPB* array_response) {
   vector<string> tablets, partitions;
   vector<master::TabletLocationsPB> locations;
   const auto table_name = RedisServiceData::GetYBTableNameForRedisDatabase(
-                              data.call()->connection_context().redis_db_to_use());
-  auto s = data.client()->GetTablets(table_name, 0, &tablets, &partitions, &locations,
-                                     true /* update tablets cache */);
+      data.call()->connection_context().redis_db_to_use());
+  auto s = data.client()->GetTabletsAndUpdateCache(
+      table_name, 0, &tablets, &partitions, &locations);
   if (!s.ok()) {
     LOG(ERROR) << "Error getting tablets: " << s.message();
     return;
@@ -750,7 +749,7 @@ class RenameData : public std::enable_shared_from_this<RenameData> {
           const string& second = *elements[i + 1];
           auto req_kv = write_dest_op_->mutable_request()->mutable_key_value();
           if (type == REDIS_TYPE_SORTEDSET) {
-            auto score = util::CheckedStold(second);
+            auto score = CheckedStold(second);
             if (!score.ok()) {
               LOG(DFATAL) << "Could not parse sorted set score " << second;
               RespondWithError("Could not parse sorted set score");
@@ -759,7 +758,7 @@ class RenameData : public std::enable_shared_from_this<RenameData> {
             req_kv->add_subkey()->set_double_subkey(*score);
             req_kv->add_value(first);
           } else if (type == REDIS_TYPE_TIMESERIES) {
-            auto ts = util::CheckedStoll(first);
+            auto ts = CheckedStoll(first);
             if (!ts.ok()) {
               LOG(DFATAL) << "Could not parse sorted set ts " << first;
               RespondWithError("Could not parse timeseries ts");
@@ -1096,22 +1095,22 @@ void HandleFlushDB(LocalCommandData data) {
 }
 
 void HandleFlushAll(LocalCommandData data) {
-  vector<yb::client::YBTableName> table_names;
   const string prefix = common::kRedisTableName;
-  Status s = data.client()->ListTables(&table_names, prefix);
-  if (!s.ok()) {
+  auto result = data.client()->ListTables(prefix);
+  if (!result.ok()) {
     RedisResponsePB resp;
-    const Slice message = s.message();
+    const Slice message = result.status().message();
     resp.set_code(RedisResponsePB_RedisStatusCode_SERVER_ERROR);
     resp.set_error_message(message.data(), message.size());
     data.Respond(&resp);
     return;
   }
+  const auto& table_names = *result;
   // Gather table ids.
   vector<string> table_ids;
   for (const auto& name : table_names) {
     std::shared_ptr<client::YBTable> table;
-    s = data.client()->OpenTable(name, &table);
+    const auto s = data.client()->OpenTable(name, &table);
     if (!s.ok()) {
       RedisResponsePB resp;
       const Slice message = s.message();
@@ -1142,7 +1141,7 @@ void HandleCreateDB(LocalCommandData data) {
   // Figure out the redis table name that we should be using.
   const string db_name = data.arg(1).ToBuffer();
   const auto table_name = RedisServiceData::GetYBTableNameForRedisDatabase(db_name);
-  gscoped_ptr<yb::client::YBTableCreator> table_creator(data.client()->NewTableCreator());
+  std::unique_ptr<yb::client::YBTableCreator> table_creator(data.client()->NewTableCreator());
   s = table_creator->table_name(table_name)
           .table_type(yb::client::YBTableType::REDIS_TABLE_TYPE)
           .Create();
@@ -1162,18 +1161,17 @@ void HandleCreateDB(LocalCommandData data) {
 void HandleListDB(LocalCommandData data) {
   RedisResponsePB resp;
   // Figure out the redis table name that we should be using.
-  vector<yb::client::YBTableName> table_names;
   const string prefix = common::kRedisTableName;
   const size_t prefix_len = strlen(common::kRedisTableName);
-  Status s = data.client()->ListTables(&table_names, prefix);
-  if (!s.ok()) {
-    const Slice message = s.message();
+  const auto result = data.client()->ListTables(prefix);
+  if (!result.ok()) {
+    const Slice message = result.status().message();
     resp.set_code(RedisResponsePB_RedisStatusCode_SERVER_ERROR);
     resp.set_error_message(message.data(), message.size());
     data.Respond(&resp);
     return;
   }
-
+  const auto& table_names = *result;
   auto array_response = resp.mutable_array_response();
   vector<string> dbs;
   for (const auto& ybname : table_names) {
@@ -1260,7 +1258,7 @@ void HandleDebugSleep(LocalCommandData data) {
     }
   };
 
-  auto time_ms = util::CheckedStoll(data.arg(1));
+  auto time_ms = CheckedStoll(data.arg(1));
   if (!time_ms.ok()) {
     RedisResponsePB resp;
     resp.set_code(RedisResponsePB::PARSING_ERROR);

@@ -28,11 +28,11 @@ import java.util.*;
 /**
  * This is an integration test that ensures we can do a master decommission.
  */
-import org.yb.YBTestRunner;
+import org.yb.util.YBTestRunnerNonTsanOnly;
 
 import org.junit.runner.RunWith;
 
-@RunWith(value=YBTestRunner.class)
+@RunWith(value=YBTestRunnerNonTsanOnly.class)
 public class TestMasterLeaderDecommission extends TestClusterBase {
   @Test(timeout = TEST_TIMEOUT_SEC * 1000) // 20 minutes.
   public void testMasterLeaderDecommission() throws Exception {
@@ -47,7 +47,7 @@ public class TestMasterLeaderDecommission extends TestClusterBase {
     HostAndPort leaderMasterHp = client.getLeaderMasterHostAndPort();
     for (HostAndPort hp : miniCluster.getMasters().keySet()) {
       if (!hp.equals(leaderMasterHp)) {
-        assertTrue(client.setFlag(hp, "do_not_start_election_test_only", "true"));
+        assertTrue(client.setFlag(hp, "TEST_do_not_start_election_test_only", "true"));
       }
     }
 

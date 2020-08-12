@@ -57,14 +57,13 @@ class SystemTableFaultTolerance : public YBTest {
     opts.extra_master_flags = extra_master_flags;
     // Master failovers should not be happening concurrently with us trying to load an initial sys
     // catalog snapshot. At least this is not supported as of 05/27/2019.
-    opts.extra_master_flags.push_back("--use_initial_sys_catalog_snapshot=false");
-    opts.extra_master_flags.push_back("--enable_ysql=false");
+    opts.enable_ysql = false;
     cluster_.reset(new ExternalMiniCluster(opts));
   }
 };
 
 TEST_F(SystemTableFaultTolerance, TestFaultTolerance) {
-  SetupCluster(0, {"--catalog_manager_simulate_system_table_create_failure=true"});
+  SetupCluster(0, {"--TEST_catalog_manager_simulate_system_table_create_failure=true"});
   // Startup should fail due to injected failure.
   ASSERT_NOK(cluster_->Start());
   uint64_t rpc_port = cluster_->master()->bound_rpc_hostport().port();
@@ -85,8 +84,9 @@ TEST_F(SystemTableFaultTolerance, TestFaultTolerance) {
       false /* Update roles' permissions cache */);
   server::ClockPtr clock(new server::HybridClock());
   ASSERT_OK(clock->Init());
-  auto processor = std::make_unique<ql::QLProcessor>(client.get(), metadata_cache, nullptr, clock,
-                                                     ql::TransactionPoolProvider());
+  auto processor = std::make_unique<ql::QLProcessor>(
+      client.get(), metadata_cache, /* ql_metrics= */ nullptr,
+      /* parser_pool= */ nullptr, clock, ql::TransactionPoolProvider());
   Synchronizer s;
   ql::StatementParameters statement_parameters;
   processor->RunAsync("SELECT * from system.peers", statement_parameters,

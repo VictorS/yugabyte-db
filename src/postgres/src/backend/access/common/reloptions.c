@@ -26,6 +26,7 @@
 #include "access/tuptoaster.h"
 #include "catalog/pg_type.h"
 #include "commands/defrem.h"
+#include "commands/tablegroup.h"
 #include "commands/tablespace.h"
 #include "commands/view.h"
 #include "nodes/makefuncs.h"
@@ -146,6 +147,17 @@ static relopt_bool boolRelOpts[] =
 			AccessExclusiveLock
 		},
 		false
+	},
+	{
+		{
+			"colocated",
+			"opt-out of using colocated tablet if set to false",
+			RELOPT_KIND_HEAP,
+			AccessExclusiveLock
+		},
+		/* true by default so that table created in colocated database will be
+		 * colocated. This option will be ignored in non-colocated database. */
+		true
 	},
 	/* list terminator */
 	{{NULL}}
@@ -348,7 +360,15 @@ static relopt_int intRelOpts[] =
 		},
 		-1, 0, 1024
 	},
-
+	{
+		{
+			"tablegroup",
+			"Tablegroup oid for this relation.",
+			RELOPT_KIND_HEAP,
+			AccessExclusiveLock
+		},
+		-1, 0, INT_MAX
+	},
 	/* list terminator */
 	{{NULL}}
 };
@@ -827,7 +847,7 @@ transformRelOptions(Datum oldOptions, List *defList, const char *namspace,
 				/* No match, so keep old option */
 				astate = accumArrayResult(astate, oldoptions[i],
 										  false, TEXTOID,
-										  CurrentMemoryContext);
+										  GetCurrentMemoryContext());
 			}
 		}
 	}
@@ -913,12 +933,12 @@ transformRelOptions(Datum oldOptions, List *defList, const char *namspace,
 
 			astate = accumArrayResult(astate, PointerGetDatum(t),
 									  false, TEXTOID,
-									  CurrentMemoryContext);
+									  GetCurrentMemoryContext());
 		}
 	}
 
 	if (astate)
-		result = makeArrayResult(astate, CurrentMemoryContext);
+		result = makeArrayResult(astate, GetCurrentMemoryContext());
 	else
 		result = (Datum) 0;
 
@@ -1382,7 +1402,10 @@ default_reloptions(Datum reloptions, bool validate, relopt_kind kind)
 		{"parallel_workers", RELOPT_TYPE_INT,
 		offsetof(StdRdOptions, parallel_workers)},
 		{"vacuum_cleanup_index_scale_factor", RELOPT_TYPE_REAL,
-		offsetof(StdRdOptions, vacuum_cleanup_index_scale_factor)}
+		offsetof(StdRdOptions, vacuum_cleanup_index_scale_factor)},
+		{"colocated", RELOPT_TYPE_BOOL,
+		offsetof(StdRdOptions, colocated)},
+		{"tablegroup", RELOPT_TYPE_INT, offsetof(StdRdOptions, tablegroup)},
 	};
 
 	options = parseRelOptions(reloptions, validate, kind, &numoptions);

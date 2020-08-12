@@ -60,6 +60,8 @@ std::string RandomHumanReadableString(int len, Random* rnd);
 
 class RandomDeviceSequence {
  public:
+  typedef std::random_device::result_type result_type;
+
   template<class It>
   void generate(It begin, const It& end) {
     std::generate(begin, end, [this] { return device_(); });
@@ -124,7 +126,9 @@ Real RandomUniformReal(std::mt19937_64* rng = nullptr) {
 }
 
 inline bool RandomActWithProbability(double probability, std::mt19937_64* rng = nullptr) {
-  return probability <= 0 ? false : RandomUniformReal<double>(rng) < probability;
+  return probability <= 0 ? false
+                          : probability >= 1.0 ? true
+                                               : RandomUniformReal<double>(rng) < probability;
 }
 
 template <class Collection>

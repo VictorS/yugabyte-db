@@ -1,11 +1,11 @@
 // Copyright (c) YugaByte, Inc.
 
 import React, { Component } from 'react';
-import { getPromiseState } from 'utils/PromiseUtils';
+import { getPromiseState } from '../../../utils/PromiseUtils';
 import 'react-bootstrap-multiselect/css/bootstrap-multiselect.css';
 import { browserHistory } from 'react-router';
 import { YBModal, YBCheckBox, YBTextInput } from '../../common/forms/fields';
-import { isEmptyObject } from 'utils/ObjectUtils';
+import { isEmptyObject } from '../../../utils/ObjectUtils';
 import { getReadOnlyCluster } from "../../../utils/UniverseUtils";
 
 export default class DeleteUniverse extends Component {
@@ -52,8 +52,8 @@ export default class DeleteUniverse extends Component {
     }
   };
 
-  componentWillReceiveProps(nextProps) {
-    if (getPromiseState(this.props.universe.deleteUniverse).isLoading() && getPromiseState(nextProps.universe.deleteUniverse).isSuccess()) {
+  componentDidUpdate(prevProps) {
+    if (getPromiseState(prevProps.universe.deleteUniverse).isLoading() && getPromiseState(this.props.universe.deleteUniverse).isSuccess()) {
       this.props.fetchUniverseMetadata();
       browserHistory.push('/universes');
     }

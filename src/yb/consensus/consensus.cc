@@ -45,6 +45,10 @@ namespace consensus {
 using std::shared_ptr;
 using strings::Substitute;
 
+std::string LeaderElectionData::ToString() const {
+  return YB_STRUCT_TO_STRING(mode, originator_uuid, pending_commit, must_be_committed_opid);
+}
+
 ConsensusBootstrapInfo::ConsensusBootstrapInfo()
   : last_id(MinimumOpId()),
     last_committed_id(MinimumOpId()) {
@@ -64,9 +68,10 @@ ConsensusRound::ConsensusRound(Consensus* consensus,
   DCHECK_NOTNULL(replicate_msg_.get());
 }
 
-void ConsensusRound::NotifyReplicationFinished(const Status& status, int64_t leader_term) {
+void ConsensusRound::NotifyReplicationFinished(
+    const Status& status, int64_t leader_term, OpIds* applied_op_ids) {
   if (PREDICT_FALSE(replicated_cb_ == nullptr)) return;
-  replicated_cb_(status, leader_term);
+  replicated_cb_(status, leader_term, applied_op_ids);
 }
 
 Status ConsensusRound::CheckBoundTerm(int64_t current_term) const {
@@ -80,8 +85,8 @@ Status ConsensusRound::CheckBoundTerm(int64_t current_term) const {
   return Status::OK();
 }
 
-LeaderStatus Consensus::GetLeaderStatus() const {
-  return GetLeaderState().status;
+LeaderStatus Consensus::GetLeaderStatus(bool allow_stale) const {
+  return GetLeaderState(allow_stale).status;
 }
 
 int64_t Consensus::LeaderTerm() const {

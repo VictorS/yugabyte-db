@@ -3,8 +3,7 @@
 import { connect } from 'react-redux';
 import { UniverseDetail } from '../../universes';
 import { fetchUniverseInfo, fetchUniverseInfoResponse, resetUniverseInfo, closeUniverseDialog, getHealthCheck,
-  getHealthCheckResponse
-} from '../../../actions/universe';
+  getHealthCheckResponse } from '../../../actions/universe';
 
 import { getAlerts, getAlertsSuccess, getAlertsFailure } from '../../../actions/customers';
 
@@ -46,6 +45,9 @@ const mapDispatchToProps = (dispatch) => {
     },
     showGFlagsModal: () => {
       dispatch(openDialog("gFlagsModal"));
+    },
+    showManageKeyModal: () => {
+      dispatch(openDialog("manageKeyModal"));
     },
     showDeleteUniverseModal: () => {
       dispatch(openDialog("deleteUniverseModal"));
@@ -124,6 +126,7 @@ function mapStateToProps(state, ownProps) {
     customer: state.customer,
     universe: state.universe,
     tasks: state.tasks,
+    universeTables: state.tables.universeTablesList,
     modal: state.modal,
     providers: state.cloud.providers,
     updateAvailable: isUpdateAvailable(state)

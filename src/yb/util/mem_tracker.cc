@@ -52,6 +52,7 @@
 #include "yb/util/debug/trace_event.h"
 #include "yb/util/env.h"
 #include "yb/util/flag_tags.h"
+#include "yb/util/memory/memory.h"
 #include "yb/util/metrics.h"
 #include "yb/util/mutex.h"
 #include "yb/util/random_util.h"
@@ -174,9 +175,7 @@ std::string CreateMetricName(const MemTracker& mem_tracker) {
     return "mem_tracker";
   }
   std::string id = mem_tracker.id();
-  std::replace(id.begin(), id.end(), ' ', '_');
-  std::replace(id.begin(), id.end(), '.', '_');
-  std::replace(id.begin(), id.end(), '-', '_');
+  EscapeMetricNameForPrometheus(&id);
   if (mem_tracker.parent()) {
     return CreateMetricName(*mem_tracker.parent()) + "_" + id;
   } else {
@@ -210,7 +209,7 @@ class MemTracker::TrackerMetrics {
         std::unique_ptr<GaugePrototype<int64_t>>(new OwningGaugePrototype<int64_t>(
           metric_entity_->prototype().name(), std::move(name),
           CreateMetricLabel(mem_tracker), MetricUnit::kBytes,
-          CreateMetricDescription(mem_tracker))),
+          CreateMetricDescription(mem_tracker), yb::MetricLevel::kInfo)),
         mem_tracker.consumption());
   }
 
@@ -439,6 +438,10 @@ std::vector<MemTrackerPtr> MemTracker::ListTrackers() {
 }
 
 bool MemTracker::UpdateConsumption(bool force) {
+  if (poll_children_consumption_functors_) {
+    poll_children_consumption_functors_();
+  }
+
   if (consumption_functor_) {
     auto now = CoarseMonoClock::now();
     auto interval = std::chrono::microseconds(
@@ -587,7 +590,7 @@ bool MemTracker::LimitExceeded() {
   return false;
 }
 
-SoftLimitExceededResult MemTracker::SoftLimitExceeded(double score) {
+SoftLimitExceededResult MemTracker::SoftLimitExceeded(double* score) {
   // Did we exceed the actual limit?
   if (LimitExceeded()) {
     return {true, consumption() * 100.0 / limit()};
@@ -605,16 +608,16 @@ SoftLimitExceededResult MemTracker::SoftLimitExceeded(double score) {
   }
 
   // We're over the threshold; were we randomly chosen to be over the soft limit?
-  if (score == 0.0) {
-    score = RandomUniformReal<double>();
+  if (*score == 0.0) {
+    *score = RandomUniformReal<double>();
   }
-  if (usage + (limit_ - soft_limit_) * score > limit_ && GcMemory(soft_limit_)) {
+  if (usage + (limit_ - soft_limit_) * *score > limit_ && GcMemory(soft_limit_)) {
     return {true, usage * 100.0 / limit()};
   }
   return {false, 0.0};
 }
 
-SoftLimitExceededResult MemTracker::AnySoftLimitExceeded(double score) {
+SoftLimitExceededResult MemTracker::AnySoftLimitExceeded(double* score) {
   for (MemTracker* t : limit_trackers_) {
     auto result = t->SoftLimitExceeded(score);
     if (result.exceeded) {
@@ -734,9 +737,9 @@ void MemTracker::GcTcmalloc() {
 #endif
 }
 
-string MemTracker::LogUsage(const string& prefix) const {
+string MemTracker::LogUsage(const string& prefix, size_t usage_threshold, int indent) const {
   stringstream ss;
-  ss << prefix << id_ << ":";
+  ss << prefix << std::string(indent, ' ') << id_ << ":";
   if (CheckLimitExceeded()) {
     ss << " memory limit exceeded.";
   }
@@ -751,9 +754,9 @@ string MemTracker::LogUsage(const string& prefix) const {
   std::lock_guard<std::mutex> lock(child_trackers_mutex_);
   for (const auto& p : child_trackers_) {
     auto child = p.second.lock();
-    if (child) {
+    if (child && child->consumption() >= usage_threshold) {
       ss << std::endl;
-      ss << child->LogUsage(prefix);
+      ss << child->LogUsage(prefix, usage_threshold, indent + 2);
     }
   }
   return ss.str();
@@ -777,7 +780,10 @@ shared_ptr<MemTracker> MemTracker::GetRootTracker() {
 void MemTracker::SetMetricEntity(
     const MetricEntityPtr& metric_entity, const std::string& name_suffix) {
   if (metrics_) {
-    LOG(DFATAL) << "SetMetricEntity while " << ToString() << " already has metric entity";
+    LOG_IF(DFATAL, metric_entity->id() != metrics_->metric_entity_->id())
+        << "SetMetricEntity (" << metric_entity->id() << ") while "
+        << ToString() << " already has a different metric entity "
+        << metrics_->metric_entity_->id();
     return;
   }
   metrics_ = std::make_unique<TrackerMetrics>(metric_entity);
@@ -829,6 +835,36 @@ std::string DumpMemTrackers() {
     out << std::endl;
   }
   return out.str();
+}
+
+std::string DumpMemoryUsage() {
+  std::ostringstream out;
+  auto tcmalloc_stats = TcMallocStats();
+  if (!tcmalloc_stats.empty()) {
+    out << "TCMalloc stats: \n" << tcmalloc_stats << "\n";
+  }
+  out << "Memory usage: \n" << DumpMemTrackers();
+  return out.str();
+}
+
+bool CheckMemoryPressureWithLogging(
+    const MemTrackerPtr& mem_tracker, double score, const char* error_prefix) {
+  const auto soft_limit_exceeded_result = mem_tracker->AnySoftLimitExceeded(&score);
+  if (!soft_limit_exceeded_result.exceeded) {
+    return true;
+  }
+
+  const std::string msg = StringPrintf(
+      "Soft memory limit exceeded (at %.2f%% of capacity), score: %.2f",
+      soft_limit_exceeded_result.current_capacity_pct, score);
+  if (soft_limit_exceeded_result.current_capacity_pct >=
+      FLAGS_memory_limit_warn_threshold_percentage) {
+    YB_LOG_EVERY_N_SECS(WARNING, 1) << error_prefix << msg << THROTTLE_MSG;
+  } else {
+    YB_LOG_EVERY_N_SECS(INFO, 1) << error_prefix << msg << THROTTLE_MSG;
+  }
+
+  return false;
 }
 
 } // namespace yb

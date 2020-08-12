@@ -1,7 +1,8 @@
 ---
-title: SHOW TRANSACTION
+title: SHOW TRANSACTION statement [YSQL]
+headerTitle: SHOW TRANSACTION
 linkTitle: SHOW TRANSACTION
-description: SHOW TRANSACTION
+description: Use the SHOW TRANSACTION statement to show the current transaction isolation level.
 summary: SHOW TRANSACTION
 menu:
   latest:
@@ -56,4 +57,4 @@ The `TRANSACTION ISOLATION LEVEL` returned is either `SERIALIZABLE` or `REPEATAB
 ## See also
 
 - [`SHOW TRANSACTION`](../txn_show)
-- [`Transaction isolation levels`](../../architecture/transactions/isolation-levels)
+- [`Transaction isolation levels`](../../../../architecture/transactions/isolation-levels)

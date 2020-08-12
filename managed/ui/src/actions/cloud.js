@@ -43,6 +43,7 @@ export const CREATE_NODE_INSTANCES_RESPONSE = 'CREATE_NODE_INSTANCE_RESPONSES';
 
 export const CREATE_ACCESS_KEY = 'CREATE_ACCESS_KEY';
 export const CREATE_ACCESS_KEY_RESPONSE = 'CREATE_ACCESS_KEY_RESPONSE';
+export const CREATE_ACCESS_KEY_FAILURE = 'CREATE_ACCESS_KEY_FAILURE';
 
 export const INITIALIZE_PROVIDER = 'INITIALIZE_PROVIDER';
 export const INITIALIZE_PROVIDER_SUCCESS = 'INITIALIZE_PROVIDER_SUCCESS';
@@ -294,6 +295,7 @@ export function createAccessKey(providerUUID, regionUUID, keyInfo) {
     keyType: "PRIVATE",
     keyContent: keyInfo.privateKeyContent,
     sshUser: keyInfo.sshUser,
+    sshPort: keyInfo.sshPort,
     passwordlessSudoAccess: keyInfo.passwordlessSudoAccess,
     airGapInstall: keyInfo.airGapInstall
   };
@@ -309,6 +311,13 @@ export function createAccessKeyResponse(result) {
   return {
     type: CREATE_ACCESS_KEY_RESPONSE,
     payload: result
+  };
+}
+
+export function createAccessKeyFailure(error) {
+  return {
+    type: CREATE_ACCESS_KEY_FAILURE,
+    payload: error
   };
 }
 
@@ -344,8 +353,8 @@ export function createKMSProviderConfigResponse(result) {
   };
 }
 
-export function deleteKMSProviderConfig(provider) {
-  const endpoint = getCustomerEndpoint() + `/kms_configs/${provider}`;
+export function deleteKMSProviderConfig(configUUID) {
+  const endpoint = getCustomerEndpoint() + `/kms_configs/${configUUID}`;
   const request = axios.delete(endpoint);
   return {
     type: DELETE_KMS_CONFIGURATION,

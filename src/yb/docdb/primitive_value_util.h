@@ -17,7 +17,6 @@
 #define YB_DOCDB_PRIMITIVE_VALUE_UTIL_H
 
 #include "yb/common/schema.h"
-#include "yb/common/ql_value.h"
 #include "yb/docdb/docdb.h"
 #include "yb/docdb/primitive_value.h"
 
@@ -36,6 +35,21 @@ CHECKED_STATUS InitKeyColumnPrimitiveValues(
     const Schema &schema,
     size_t start_idx,
     vector<PrimitiveValue> *components);
+
+boost::optional<int32_t> DocHashCode(const PgsqlReadRequestPB& request,
+                                     int64_t batch_arg_index);
+
+boost::optional<int32_t> DocMaxHashCode(const PgsqlReadRequestPB& request,
+                                        int64_t batch_arg_index);
+bool DocHasRangeValues(const PgsqlReadRequestPB& request, int64_t batch_arg_index);
+
+const google::protobuf::RepeatedPtrField<PgsqlExpressionPB>&
+DocRangeValues(const PgsqlReadRequestPB& request, int64_t batch_arg_index);
+
+bool DocHasPartitionValues(const PgsqlReadRequestPB& request, int64_t batch_arg_index);
+
+const google::protobuf::RepeatedPtrField<PgsqlExpressionPB>&
+DocPartitionValues(const PgsqlReadRequestPB& request, int64_t batch_arg_index);
 
 }  // namespace docdb
 }  // namespace yb

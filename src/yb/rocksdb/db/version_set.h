@@ -233,6 +233,8 @@ class VersionStorageInfo {
     return static_cast<int>(files_[level].size());
   }
 
+  uint64_t NumFiles() const;
+
   // Return the combined file size of all files at the specified level.
   uint64_t NumLevelBytes(int level) const;
 
@@ -515,6 +517,10 @@ class Version {
 
   size_t GetMemoryUsageByTableReaders();
 
+  // Returns approximate middle key of the largest SST file (see TableReader::GetMiddleKey).
+  // Returns Status(Incomplete) if there are no SST files for this version.
+  Result<std::string> GetMiddleKey();
+
   ColumnFamilyData* cfd() const { return cfd_; }
 
   // Return the next Version in the linked list. Used for debug only
@@ -752,6 +758,10 @@ class VersionSet {
   static uint64_t GetNumLiveVersions(Version* dummy_versions);
 
   static uint64_t GetTotalSstFilesSize(Version* dummy_versions);
+
+  bool has_manifest_writers() const {
+    return !manifest_writers_.empty();
+  }
 
  private:
   struct ManifestWriter;

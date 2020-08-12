@@ -73,6 +73,7 @@
 #include "access/sysattr.h"
 #include "catalog/pg_database.h"
 #include "executor/ybcModifyTable.h"
+#include "parser/parsetree.h"
 #include "pg_yb_utils.h"
 #include "optimizer/ybcplan.h"
 
@@ -423,24 +424,18 @@ ExecInsert(ModifyTableState *mtstate,
 		 * Check the constraints of the tuple.
 		 */
 		if (resultRelationDesc->rd_att->constr)
-			ExecConstraints(resultRelInfo, slot, estate);
+			ExecConstraints(resultRelInfo, slot, estate, mtstate);
 
 		/*
 		 * Also check the tuple against the partition constraint, if there is
 		 * one; except that if we got here via tuple-routing, we don't need to
 		 * if there's no BR trigger defined on the partition.
 		 */
-		if (!IsYBRelation(resultRelationDesc))
-		{
-			/*
-			 * TODO(Hector) When partitioning is supported in YugaByte, this check must be enabled.
-			 */
-			if (resultRelInfo->ri_PartitionCheck &&
-					(resultRelInfo->ri_PartitionRoot == NULL ||
-					 (resultRelInfo->ri_TrigDesc &&
-						resultRelInfo->ri_TrigDesc->trig_insert_before_row)))
-				ExecPartitionCheck(resultRelInfo, slot, estate, true);
-		}
+		if (resultRelInfo->ri_PartitionCheck &&
+				(resultRelInfo->ri_PartitionRoot == NULL ||
+				 (resultRelInfo->ri_TrigDesc &&
+					resultRelInfo->ri_TrigDesc->trig_insert_before_row)))
+			ExecPartitionCheck(resultRelInfo, slot, estate, true);
 
 		if (onconflict != ONCONFLICT_NONE && resultRelInfo->ri_NumIndices > 0)
 		{
@@ -1123,7 +1118,38 @@ ExecUpdate(ModifyTableState *mtstate,
 	}
 	else if (IsYBRelation(resultRelationDesc))
 	{
-		bool row_found = YBCExecuteUpdate(resultRelationDesc, planSlot, tuple, estate, mtstate);
+		if (resultRelInfo->ri_WithCheckOptions != NIL)
+			ExecWithCheckOptions(WCO_RLS_UPDATE_CHECK, resultRelInfo, slot, estate);
+
+		/*
+		 * Check the constraints of the tuple.
+		 */
+		if (resultRelationDesc->rd_att->constr)
+			ExecConstraints(resultRelInfo, slot, estate, mtstate);
+
+		/*
+		 * Verify that the update does not violate partition constraints.
+		 */
+		ExecPartitionCheck(resultRelInfo, slot, estate, true /* emitError */);
+
+		RangeTblEntry *rte = rt_fetch(resultRelInfo->ri_RangeTableIndex,
+									  estate->es_range_table);
+
+		bool row_found = false;
+
+		bool is_pk_updated =
+			bms_overlap(YBGetTablePrimaryKeyBms(resultRelationDesc), rte->updatedCols);
+
+		if (is_pk_updated)
+		{
+			YBCExecuteUpdateReplace(resultRelationDesc, planSlot, tuple, estate, mtstate);
+			row_found = true;
+		}
+		else
+		{
+			row_found = YBCExecuteUpdate(resultRelationDesc, planSlot, tuple, estate, mtstate, rte->updatedCols);
+		}
+
 		if (!row_found)
 		{
 			/*
@@ -1134,14 +1160,10 @@ ExecUpdate(ModifyTableState *mtstate,
 		}
 
 		/*
-		 * Prepare the updated tuple in inner slot for RETURNING clause execution.
-		 * For ON CONFLICT DO UPDATE, the INSERT returning clause is setup
-		 * differently, so junkFilter is not needed.
+		 * Update indexes if needed.
 		 */
-		if (resultRelInfo->ri_projectReturning && resultRelInfo->ri_junkFilter)
-			slot = ExecFilterJunk(resultRelInfo->ri_junkFilter, planSlot);
-
-		if (YBCRelInfoHasSecondaryIndices(resultRelInfo))
+		if (YBCRelInfoHasSecondaryIndices(resultRelInfo) &&
+		    !((ModifyTable *)mtstate->ps.plan)->no_index_update)
 		{
 			Datum	ybctid = YBCGetYBTupleIdFromSlot(planSlot);
 
@@ -1333,7 +1355,7 @@ lreplace:;
 		 * have it validate all remaining checks.
 		 */
 		if (resultRelationDesc->rd_att->constr)
-			ExecConstraints(resultRelInfo, slot, estate);
+			ExecConstraints(resultRelInfo, slot, estate, mtstate);
 
 		/*
 		 * replace the heap tuple
@@ -1449,13 +1471,15 @@ lreplace:;
 	if (canSetTag)
 		(estate->es_processed)++;
 
-	/* AFTER ROW UPDATE Triggers */
-	ExecARUpdateTriggers(estate, resultRelInfo, tupleid, oldtuple, tuple,
-						 recheckIndexes,
-						 mtstate->operation == CMD_INSERT ?
-						 mtstate->mt_oc_transition_capture :
-						 mtstate->mt_transition_capture);
-
+	if (!((ModifyTable *)mtstate->ps.plan)->no_row_trigger)
+	{
+		/* AFTER ROW UPDATE Triggers */
+		ExecARUpdateTriggers(estate, resultRelInfo, tupleid, oldtuple, tuple,
+							recheckIndexes,
+							mtstate->operation == CMD_INSERT ?
+							mtstate->mt_oc_transition_capture :
+							mtstate->mt_transition_capture);
+	}
 	list_free(recheckIndexes);
 
 	/*
@@ -1470,9 +1494,20 @@ lreplace:;
 	if (resultRelInfo->ri_WithCheckOptions != NIL)
 		ExecWithCheckOptions(WCO_VIEW_CHECK, resultRelInfo, slot, estate);
 
+
 	/* Process RETURNING if present */
 	if (resultRelInfo->ri_projectReturning)
+	{
+		/*
+		 * Prepare the updated tuple in inner slot for RETURNING clause execution.
+		 * For ON CONFLICT DO UPDATE, the INSERT returning clause is setup
+		 * differently, so junkFilter is not needed.
+		 */
+		if (IsYBRelation(resultRelationDesc) && resultRelInfo->ri_junkFilter)
+			slot = ExecFilterJunk(resultRelInfo->ri_junkFilter, planSlot);
+
 		return ExecProcessReturning(resultRelInfo, slot, planSlot);
+	}
 
 	return NULL;
 }
@@ -2454,7 +2489,6 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 	mtstate->mt_plans = (PlanState **) palloc0(sizeof(PlanState *) * nplans);
 	mtstate->resultRelInfo = estate->es_result_relations + node->resultRelIndex;
 	mtstate->yb_mt_is_single_row_update_or_delete = YBCIsSingleRowUpdateOrDelete(node);
-	mtstate->yb_mt_update_attrs = node->ybUpdateAttrs;
 
 	/* If modifying a partitioned table, initialize the root table info */
 	if (node->rootResultRelIndex >= 0)

@@ -1,7 +1,8 @@
 ---
-title: SET ROLE
-description: SET ROLE
-summary: Roles (users and groups)
+title: SET ROLE statement [YSQL]
+headerTitle: SET ROLE
+linkTitle: SET ROLE
+description: Use the SET ROLE statement to set the current user of the current session to be the specified user.
 menu:
   latest:
     identifier: api-ysql-commands-set-role
@@ -14,7 +15,7 @@ showAsideToc: true
 
 ## Synopsis
 
-`SET ROLE` sets the current user of the current session to be the specified user.
+Use the `SET ROLE` statement to set the current user of the current session to be the specified user.
 
 ## Syntax
 
@@ -91,7 +92,6 @@ ERROR:  permission denied to create database
 
 ## See also
 
-[`CREATE ROLE`](../dcl_create_role)
-[`GRANT`](../dcl_grant)
-[`REVOKE`](../dcl_revoke)
-[Other YSQL Statements](..)
+- [`CREATE ROLE`](../dcl_create_role)
+- [`GRANT`](../dcl_grant)
+- [`REVOKE`](../dcl_revoke)

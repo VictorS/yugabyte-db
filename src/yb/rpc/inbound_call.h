@@ -161,6 +161,10 @@ class InboundCall : public RpcCall, public MPSCQueueEntry<InboundCall> {
     return &task_;
   }
 
+  void ResetCallProcessedListener() {
+    call_processed_listener_ = decltype(call_processed_listener_)();
+  }
+
   virtual const std::string& method_name() const = 0;
   virtual const std::string& service_name() const = 0;
   virtual void RespondFailure(ErrorStatusPB::RpcErrorCodePB error_code, const Status& status) = 0;
@@ -192,13 +196,9 @@ class InboundCall : public RpcCall, public MPSCQueueEntry<InboundCall> {
     return result;
   }
 
-  // Retain this object, so it would not get deleted even when all external references to it are
-  // destroyed. We need this function to have ability to add InboundCall to data structures that
-  // could operate only on raw pointers.
-  void RetainSelf();
+  size_t DynamicMemoryUsage() const override;
 
-  // Stop retaining this object.
-  void UnretainSelf();
+  const CallData& request_data() const { return request_data_; }
 
  protected:
   void NotifyTransferred(const Status& status, Connection* conn) override;
@@ -214,7 +214,7 @@ class InboundCall : public RpcCall, public MPSCQueueEntry<InboundCall> {
   void QueueResponse(bool is_success);
 
   // The serialized bytes of the request param protobuf. Set by ParseFrom().
-  // This references memory held by 'transfer_'.
+  // This references memory held by 'request_data_'.
   Slice serialized_request_;
 
   // Data source of this call.
@@ -234,7 +234,7 @@ class InboundCall : public RpcCall, public MPSCQueueEntry<InboundCall> {
   // The connection on which this inbound call arrived. Can be null for LocalYBInboundCall.
   ConnectionPtr conn_ = nullptr;
   RpcMetrics* rpc_metrics_;
-  const std::function<void(InboundCall*)> call_processed_listener_;
+  std::function<void(InboundCall*)> call_processed_listener_;
 
   class InboundCallTask : public ThreadPoolTask {
    public:
@@ -255,7 +255,6 @@ class InboundCall : public RpcCall, public MPSCQueueEntry<InboundCall> {
   };
 
   InboundCallTask task_;
-  InboundCallPtr retained_self_;
   InboundCallHandler* tracker_ = nullptr;
 
   DISALLOW_COPY_AND_ASSIGN(InboundCall);

@@ -35,11 +35,13 @@
 
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include "yb/gutil/macros.h"
 #include "yb/integration-tests/mini_cluster_base.h"
 #include "yb/master/catalog_entity_info.h"
+#include "yb/server/skewed_clock.h"
 #include "yb/tablet/tablet.h"
 #include "yb/tserver/tablet_server_options.h"
 #include "yb/util/env.h"
@@ -201,6 +203,10 @@ class MiniCluster : public MiniClusterBase {
   CHECKED_STATUS WaitForTabletServerCount(int count,
                                   std::vector<std::shared_ptr<master::TSDescriptor> >* descs);
 
+  // Wait for all tablet servers to be registered. Returns Status::TimedOut if the desired count is
+  // not achieved within kRegistrationWaitTimeSeconds.
+  CHECKED_STATUS WaitForAllTabletServers();
+
   uint16_t AllocateFreePort() {
     return port_picker_.AllocateFreePort();
   }
@@ -237,7 +243,6 @@ class MiniCluster : public MiniClusterBase {
   Ports master_web_ports_;
   Ports tserver_rpc_ports_;
   Ports tserver_web_ports_;
-  uint16_t next_port_ = 0;
 
   MiniMasters mini_masters_;
   MiniTabletServers mini_tablet_servers_;
@@ -253,12 +258,17 @@ void StepDownRandomTablet(MiniCluster* cluster);
 
 YB_DEFINE_ENUM(ListPeersFilter, (kAll)(kLeaders)(kNonLeaders));
 
+std::unordered_set<string> ListTabletIdsForTable(MiniCluster* cluster, const string& table_id);
+
 std::vector<std::shared_ptr<tablet::TabletPeer>> ListTabletPeers(
     MiniCluster* cluster, ListPeersFilter filter);
 
 std::vector<std::shared_ptr<tablet::TabletPeer>> ListTabletPeers(
     MiniCluster* cluster,
     const std::function<bool(const std::shared_ptr<tablet::TabletPeer>&)>& filter);
+
+CHECKED_STATUS WaitUntilTabletHasLeader(
+    MiniCluster* cluster, const string& tablet_id, MonoTime deadline);
 
 CHECKED_STATUS WaitForLeaderOfSingleTablet(
     MiniCluster* cluster, tablet::TabletPeerPtr leader, MonoDelta duration,
@@ -281,7 +291,7 @@ CHECKED_STATUS WaitAllReplicasHaveIndex(MiniCluster* cluster, int64_t index, Mon
 std::thread RestartsThread(
     MiniCluster* cluster, CoarseDuration interval, std::atomic<bool>* stop_flag);
 
-std::vector<rocksdb::DB*> GetAllRocksDbs(MiniCluster* cluster);
+std::vector<rocksdb::DB*> GetAllRocksDbs(MiniCluster* cluster, bool include_intents = true);
 
 int NumTotalRunningCompactions(MiniCluster* cluster);
 
@@ -291,6 +301,16 @@ Result<scoped_refptr<master::TableInfo>> FindTable(
     MiniCluster* cluster, const client::YBTableName& table_name);
 
 CHECKED_STATUS WaitForInitDb(MiniCluster* cluster);
+
+using TabletPeerFilter = std::function<bool(const tablet::TabletPeer*)>;
+size_t CountIntents(MiniCluster* cluster, const TabletPeerFilter& filter = TabletPeerFilter());
+
+tserver::MiniTabletServer* FindTabletLeader(MiniCluster* cluster, const TabletId& tablet_id);
+
+void ShutdownAllTServers(MiniCluster* cluster);
+CHECKED_STATUS StartAllTServers(MiniCluster* cluster);
+void ShutdownAllMasters(MiniCluster* cluster);
+CHECKED_STATUS StartAllMasters(MiniCluster* cluster);
 
 }  // namespace yb
 

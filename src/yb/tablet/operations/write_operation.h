@@ -49,19 +49,13 @@
 
 #include "yb/gutil/macros.h"
 
-#include "yb/tablet/lock_manager.h"
 #include "yb/tablet/tablet.pb.h"
 #include "yb/tablet/operations/operation.h"
 
 #include "yb/util/locks.h"
+#include "yb/util/operation_counter.h"
 
 namespace yb {
-struct DecodedRowOperation;
-class ConstContiguousRow;
-
-namespace consensus {
-class Consensus;
-}
 
 namespace tserver {
 class WriteRequestPB;
@@ -158,11 +152,23 @@ class WriteOperationState : public OperationState {
     return kind_;
   }
 
+  void set_force_txn_path() {
+    force_txn_path_ = true;
+  }
+
+  bool force_txn_path() const {
+    return force_txn_path_;
+  }
+
+  void SetTablet(Tablet* tablet) override;
+
  private:
   // Reset the response, and row_ops_ (which refers to data
   // from the request). Request is owned by WriteOperation using a unique_ptr.
   // A copy is made at initialization, so we don't need to reset it.
   void ResetRpcFields();
+
+  HybridTime WriteHybridTime() const override;
 
   // pointers to the rpc context, request and response, lifecycle
   // is managed by the rpc subsystem. These pointers maybe nullptr if the
@@ -185,6 +191,10 @@ class WriteOperationState : public OperationState {
 
   docdb::OperationKind kind_;
 
+  // True if we know that this operation is on a transactional table so make sure we go through the
+  // transactional codepath.
+  bool force_txn_path_ = false;
+
   DISALLOW_COPY_AND_ASSIGN(WriteOperationState);
 };
 
@@ -192,7 +202,6 @@ class WriteOperationContext {
  public:
   // When operation completes, its callback is executed.
   virtual void Submit(std::unique_ptr<Operation> operation, int64_t term) = 0;
-  virtual void Aborted(Operation* operation) = 0;
   virtual HybridTime ReportReadRestart() = 0;
 
   virtual ~WriteOperationContext() {}
@@ -202,9 +211,10 @@ class WriteOperationContext {
 class WriteOperation : public Operation {
  public:
   WriteOperation(std::unique_ptr<WriteOperationState> operation_state, int64_t term,
+                 ScopedOperation preparing_token,
                  CoarseTimePoint deadline, WriteOperationContext* context);
 
-  ~WriteOperation();
+  ~WriteOperation() = default;
 
   WriteOperationState* state() override {
     return down_cast<WriteOperationState*>(Operation::state());
@@ -258,6 +268,14 @@ class WriteOperation : public Operation {
     operation.release()->DoStartSynchronization(status);
   }
 
+  bool force_txn_path() const {
+    return state()->force_txn_path();
+  }
+
+  void UseSubmitToken(ScopedRWOperation&& token) {
+    submit_token_ = std::move(token);
+  }
+
  private:
   friend class DelayedApplyOperation;
 
@@ -289,9 +307,15 @@ class WriteOperation : public Operation {
   // Aborts the mvcc transaction.
   CHECKED_STATUS DoAborted(const Status& status) override;
 
-  WriteOperationContext& context_;
+  void SubmittedToPreparer() override {
+    preparing_token_ = ScopedOperation();
+  }
+
   const int64_t term_;
+  ScopedOperation preparing_token_;
+  ScopedRWOperation submit_token_;
   const CoarseTimePoint deadline_;
+  WriteOperationContext* const context_;
 
   // this transaction's start time
   MonoTime start_time_;
@@ -299,9 +323,6 @@ class WriteOperation : public Operation {
   HybridTime restart_read_ht_;
 
   docdb::DocOperations doc_ops_;
-
-  // True if operation was submitted, i.e. context_.Submit(this) was invoked.
-  bool submitted_;
 
   Tablet* tablet() { return state()->tablet(); }
 

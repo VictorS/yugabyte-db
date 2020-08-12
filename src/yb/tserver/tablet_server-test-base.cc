@@ -15,6 +15,7 @@
 
 #include "yb/client/yb_table_name.h"
 
+#include "yb/common/ql_expr.h"
 #include "yb/common/wire_protocol-test-util.h"
 
 #include "yb/consensus/consensus.h"
@@ -340,7 +341,8 @@ void TabletServerTestBase::VerifyRows(const Schema& schema, const vector<KeyValu
   ASSERT_EQ(count, expected.size());
 }
 
-const client::YBTableName TabletServerTestBase::kTableName("my_keyspace", "test-table");
+const client::YBTableName TabletServerTestBase::kTableName(
+    YQL_DATABASE_CQL, "my_keyspace", "test-table");
 const char* TabletServerTestBase::kTabletId = "test-tablet";
 
 } // namespace tserver

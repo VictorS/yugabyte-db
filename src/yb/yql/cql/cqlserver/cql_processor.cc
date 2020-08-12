@@ -15,43 +15,43 @@
 
 #include "yb/yql/cql/cqlserver/cql_processor.h"
 
+#include "yb/common/ql_value.h"
+
 #include "yb/gutil/strings/escaping.h"
 
 #include "yb/rpc/connection.h"
 #include "yb/rpc/messenger.h"
 #include "yb/rpc/rpc_context.h"
 
-#include "yb/util/crypt.h"
-
 #include "yb/yql/cql/cqlserver/cql_service.h"
 
-METRIC_DEFINE_histogram(
+METRIC_DEFINE_histogram_with_percentiles(
     server, handler_latency_yb_cqlserver_CQLServerService_GetProcessor,
     "Time spent to get a processor for processing a CQL query request.",
     yb::MetricUnit::kMicroseconds,
     "Time spent to get a processor for processing a CQL query request.", 60000000LU, 2);
-METRIC_DEFINE_histogram(
+METRIC_DEFINE_histogram_with_percentiles(
     server, handler_latency_yb_cqlserver_CQLServerService_ProcessRequest,
     "Time spent processing a CQL query request. From parsing till executing",
     yb::MetricUnit::kMicroseconds,
     "Time spent processing a CQL query request. From parsing till executing", 60000000LU, 2);
-METRIC_DEFINE_histogram(
+METRIC_DEFINE_histogram_with_percentiles(
     server, handler_latency_yb_cqlserver_CQLServerService_ParseRequest,
     "Time spent parsing CQL query request", yb::MetricUnit::kMicroseconds,
     "Time spent parsing CQL query request", 60000000LU, 2);
-METRIC_DEFINE_histogram(
+METRIC_DEFINE_histogram_with_percentiles(
     server, handler_latency_yb_cqlserver_CQLServerService_QueueResponse,
     "Time spent to queue the response for a CQL query request back on the network",
     yb::MetricUnit::kMicroseconds,
     "Time spent after computing the CQL response to queue it onto the connection.", 60000000LU, 2);
-METRIC_DEFINE_histogram(
+METRIC_DEFINE_histogram_with_percentiles(
     server, handler_latency_yb_cqlserver_CQLServerService_ExecuteRequest,
     "Time spent executing the CQL query request in the handler", yb::MetricUnit::kMicroseconds,
     "Time spent executing the CQL query request in the handler", 60000000LU, 2);
 METRIC_DEFINE_counter(
     server, yb_cqlserver_CQLServerService_ParsingErrors, "Errors encountered when parsing ",
     yb::MetricUnit::kRequests, "Errors encountered when parsing ");
-METRIC_DEFINE_histogram(
+METRIC_DEFINE_histogram_with_percentiles(
     server, handler_latency_yb_cqlserver_CQLServerService_Any,
     "yb.cqlserver.CQLServerService.AnyMethod RPC Time", yb::MetricUnit::kMicroseconds,
     "Microseconds spent handling "
@@ -68,6 +68,16 @@ METRIC_DEFINE_counter(server, cql_processors_created,
                       "Number of created CQL Processors.",
                       yb::MetricUnit::kUnits,
                       "Number of created CQL Processors.");
+
+METRIC_DEFINE_gauge_int64(server, cql_parsers_alive,
+                          "Number of alive CQL Parsers.",
+                          yb::MetricUnit::kUnits,
+                          "Number of alive CQL Parsers.");
+
+METRIC_DEFINE_counter(server, cql_parsers_created,
+                      "Number of created CQL Parsers.",
+                      yb::MetricUnit::kUnits,
+                      "Number of created CQL Parsers.");
 
 DECLARE_bool(use_cassandra_authentication);
 
@@ -126,24 +136,36 @@ CQLMetrics::CQLMetrics(const scoped_refptr<yb::MetricEntity>& metric_entity)
       METRIC_yb_cqlserver_CQLServerService_ParsingErrors.Instantiate(metric_entity);
   cql_processors_alive_ = METRIC_cql_processors_alive.Instantiate(metric_entity, 0);
   cql_processors_created_ = METRIC_cql_processors_created.Instantiate(metric_entity);
+  parsers_alive_ = METRIC_cql_parsers_alive.Instantiate(metric_entity, 0);
+  parsers_created_ = METRIC_cql_parsers_created.Instantiate(metric_entity);
 }
 
 //------------------------------------------------------------------------------------------------
 CQLProcessor::CQLProcessor(CQLServiceImpl* service_impl, const CQLProcessorListPos& pos)
     : QLProcessor(service_impl->client(), service_impl->metadata_cache(),
                   service_impl->cql_metrics().get(),
+                  &service_impl->parser_pool(),
                   service_impl->clock(),
-                  std::bind(&CQLServiceImpl::GetTransactionPool, service_impl)),
+                  std::bind(&CQLServiceImpl::TransactionPool, service_impl)),
       service_impl_(service_impl),
       cql_metrics_(service_impl->cql_metrics()),
       pos_(pos),
-      statement_executed_cb_(Bind(&CQLProcessor::StatementExecuted, Unretained(this))) {
+      statement_executed_cb_(Bind(&CQLProcessor::StatementExecuted, Unretained(this))),
+      consumption_(service_impl->processors_mem_tracker(), sizeof(*this)) {
   IncrementCounter(cql_metrics_->cql_processors_created_);
   IncrementGauge(cql_metrics_->cql_processors_alive_);
 }
 
 CQLProcessor::~CQLProcessor() {
   DecrementGauge(cql_metrics_->cql_processors_alive_);
+}
+
+void CQLProcessor::Shutdown() {
+  auto call = std::move(call_);
+  if (call) {
+    call->RespondFailure(
+        rpc::ErrorStatusPB::FATAL_SERVER_SHUTTING_DOWN, STATUS(Aborted, "Aborted"));
+  }
 }
 
 void CQLProcessor::ProcessCall(rpc::InboundCallPtr call) {
@@ -158,7 +180,7 @@ void CQLProcessor::ProcessCall(rpc::InboundCallPtr call) {
   if (!CQLRequest::ParseRequest(call_->serialized_request(), compression_scheme,
                                 &request, &response)) {
     cql_metrics_->num_errors_parsing_cql_->Increment();
-    SendResponse(*response);
+    PrepareAndSendResponse(response);
     return;
   }
 
@@ -172,7 +194,23 @@ void CQLProcessor::ProcessCall(rpc::InboundCallPtr call) {
   call_->SetRequest(request_, service_impl_);
   retry_count_ = 0;
   response.reset(ProcessRequest(*request_));
-  if (response != nullptr) {
+  PrepareAndSendResponse(response);
+}
+
+void CQLProcessor::Release() {
+  call_ = nullptr;
+  request_ = nullptr;
+  stmts_.clear();
+  parse_trees_.clear();
+  SetCurrentSession(nullptr);
+  service_impl_->ReturnProcessor(pos_);
+}
+
+void CQLProcessor::PrepareAndSendResponse(const unique_ptr<CQLResponse>& response) {
+  if (response) {
+    const CQLConnectionContext& context =
+        static_cast<const CQLConnectionContext&>(call_->connection()->context());
+    response->set_registered_events(context.registered_events());
     SendResponse(*response);
   }
 }
@@ -197,13 +235,7 @@ void CQLProcessor::SendResponse(const CQLResponse& response) {
   cql_metrics_->time_to_queue_cql_response_->Increment(
       response_done.GetDeltaSince(response_begin).ToMicroseconds());
 
-  // Release the processor.
-  call_ = nullptr;
-  request_ = nullptr;
-  stmts_.clear();
-  parse_trees_.clear();
-  SetCurrentSession(nullptr);
-  service_impl_->ReturnProcessor(pos_);
+  Release();
 }
 
 CQLResponse* CQLProcessor::ProcessRequest(const CQLRequest& req) {
@@ -309,6 +341,16 @@ CQLResponse* CQLProcessor::ProcessRequest(const ExecuteRequest& req) {
 
 CQLResponse* CQLProcessor::ProcessRequest(const QueryRequest& req) {
   VLOG(1) << "QUERY " << req.query();
+  if (service_impl_->system_cache() != nullptr) {
+    auto cached_response = service_impl_->system_cache()->Lookup(req.query());
+    if (cached_response) {
+      VLOG(1) << "Using cached response for " << req.query();
+      statement_executed_cb_.Run(
+          Status::OK(),
+          std::static_pointer_cast<ExecutedResult>(*cached_response));
+      return nullptr;
+    }
+  }
   RunAsync(req.query(), req.params(), statement_executed_cb_);
   return nullptr;
 }
@@ -368,6 +410,9 @@ CQLResponse* CQLProcessor::ProcessRequest(const AuthResponseRequest& req) {
 }
 
 CQLResponse* CQLProcessor::ProcessRequest(const RegisterRequest& req) {
+  CQLConnectionContext& context =
+      static_cast<CQLConnectionContext&>(call_->connection()->context());
+  context.add_registered_events(req.events());
   return new ReadyResponse(req);
 }
 
@@ -382,9 +427,7 @@ shared_ptr<const CQLStatement> CQLProcessor::GetPreparedStatement(const CQLMessa
 
 void CQLProcessor::StatementExecuted(const Status& s, const ExecutedResult::SharedPtr& result) {
   unique_ptr<CQLResponse> response(s.ok() ? ProcessResult(result) : ProcessError(s));
-  if (response) {
-    SendResponse(*response);
-  }
+  PrepareAndSendResponse(response);
 }
 
 CQLResponse* CQLProcessor::ProcessError(const Status& s,
@@ -475,20 +518,27 @@ CQLResponse* CQLProcessor::ProcessResult(const ExecutedResult::SharedPtr& result
           } else {
             const auto& row = row_block->row(0);
             const auto& schema = row_block->schema();
-            const auto& saved_hash =
-                row.column(schema.find_column(kRoleColumnNameSaltedHash)).string_value();
+
+            const QLValue& salted_hash_value =
+                row.column(schema.find_column(kRoleColumnNameSaltedHash));
             const auto& can_login =
                 row.column(schema.find_column(kRoleColumnNameCanLogin)).bool_value();
-            if (!can_login) {
-              return new ErrorResponse(*request_, ErrorResponse::Code::BAD_CREDENTIALS,
-                  params.username + " is not permitted to log in");
-            } else if (bcrypt_checkpw(params.password.c_str(), saved_hash.c_str())) {
+            // Username doesn't have a password, but one is required for authentication. Return
+            // an error.
+            if (salted_hash_value.IsNull()) {
               return new ErrorResponse(*request_, ErrorResponse::Code::BAD_CREDENTIALS,
                   "Provided username " + params.username + " and/or password are incorrect");
-            } else {
-              call_->ql_session()->set_current_role_name(params.username);
-              return new AuthSuccessResponse(*request_, "" /* this does not matter */);
             }
+            const auto& saved_hash = salted_hash_value.string_value();
+            if (!service_impl_->CheckPassword(params.password, saved_hash)) {
+              return new ErrorResponse(*request_, ErrorResponse::Code::BAD_CREDENTIALS,
+                  "Provided username " + params.username + " and/or password are incorrect");
+            } else if (!can_login) {
+              return new ErrorResponse(*request_, ErrorResponse::Code::BAD_CREDENTIALS,
+                                       params.username + " is not permitted to log in");
+            }
+            call_->ql_session()->set_current_role_name(params.username);
+            return new AuthSuccessResponse(*request_, "" /* this does not matter */);
           }
           break;
         }

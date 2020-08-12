@@ -53,6 +53,7 @@
 #include "yb/master/mini_master.h"
 #include "yb/master/master-test-util.h"
 #include "yb/rpc/messenger.h"
+#include "yb/rpc/rpc_test_util.h"
 #include "yb/tserver/mini_tablet_server.h"
 #include "yb/tserver/tablet_server.h"
 #include "yb/util/hdr_histogram.h"
@@ -77,14 +78,15 @@ using yb::rpc::RpcController;
 
 DECLARE_int32(heartbeat_interval_ms);
 DECLARE_bool(log_preallocate_segments);
-DECLARE_bool(enable_remote_bootstrap);
+DECLARE_bool(TEST_enable_remote_bootstrap);
 DECLARE_int32(tserver_unresponsive_timeout_ms);
 DECLARE_int32(max_create_tablets_per_ts);
 
 DEFINE_int32(num_test_tablets, 60, "Number of tablets for stress test");
 DEFINE_int32(benchmark_runtime_secs, 5, "Number of seconds to run the benchmark");
 DEFINE_int32(benchmark_num_threads, 16, "Number of threads to run the benchmark");
-DEFINE_int32(benchmark_num_tablets, 60, "Number of tablets to create");
+// Increase this for actually using this as a benchmark test.
+DEFINE_int32(benchmark_num_tablets, 8, "Number of tablets to create");
 
 METRIC_DECLARE_histogram(handler_latency_yb_master_MasterService_GetTableLocations);
 
@@ -120,7 +122,7 @@ class CreateTableStressTest : public YBMiniClusterTestBase<MiniCluster> {
 
     // Workaround KUDU-941: without this, it's likely that while shutting
     // down tablets, they'll get resuscitated by their existing leaders.
-    FLAGS_enable_remote_bootstrap = false;
+    FLAGS_TEST_enable_remote_bootstrap = false;
 
     YBMiniClusterTestBase::SetUp();
     MiniClusterOptions opts;
@@ -158,8 +160,9 @@ class CreateTableStressTest : public YBMiniClusterTestBase<MiniCluster> {
 };
 
 void CreateTableStressTest::CreateBigTable(const YBTableName& table_name, int num_tablets) {
-  ASSERT_OK(client_->CreateNamespaceIfNotExists(table_name.namespace_name()));
-  gscoped_ptr<YBTableCreator> table_creator(client_->NewTableCreator());
+  ASSERT_OK(client_->CreateNamespaceIfNotExists(table_name.namespace_name(),
+                                                table_name.namespace_type()));
+  std::unique_ptr<YBTableCreator> table_creator(client_->NewTableCreator());
   ASSERT_OK(table_creator->table_name(table_name)
             .schema(&schema_)
             .num_tablets(num_tablets)
@@ -170,7 +173,7 @@ void CreateTableStressTest::CreateBigTable(const YBTableName& table_name, int nu
 TEST_F(CreateTableStressTest, GetTableLocationsBenchmark) {
   FLAGS_max_create_tablets_per_ts = FLAGS_benchmark_num_tablets;
   DontVerifyClusterBeforeNextTearDown();
-  YBTableName table_name("my_keyspace", "test_table");
+  YBTableName table_name(YQL_DATABASE_CQL, "my_keyspace", "test_table");
   LOG(INFO) << CURRENT_TEST_NAME() << ": Step 1. Creating big table "
             << table_name.ToString() << " ...";
   LOG_TIMING(INFO, "creating big table") {
@@ -195,7 +198,7 @@ TEST_F(CreateTableStressTest, GetTableLocationsBenchmark) {
   // would be used for the connection to the master, so this benchmark would
   // probably be testing the serialization and network code rather than the
   // master GTL code.
-  vector<AutoShutdownMessengerHolder> messengers;
+  vector<rpc::AutoShutdownMessengerHolder> messengers;
   vector<unique_ptr<MasterServiceProxy>> proxies;
   vector<unique_ptr<rpc::ProxyCache>> caches;
   messengers.reserve(kNumThreads);
@@ -256,7 +259,7 @@ TEST_F(CreateTableStressTest, CreateAndDeleteBigTable) {
     LOG(INFO) << "Skipping slow test";
     return;
   }
-  YBTableName table_name("my_keyspace", "test_table");
+  YBTableName table_name(YQL_DATABASE_CQL, "my_keyspace", "test_table");
   ASSERT_NO_FATALS(CreateBigTable(table_name, FLAGS_num_test_tablets));
   master::GetTableLocationsResponsePB resp;
   ASSERT_OK(WaitForRunningTabletCount(cluster_->mini_master(), table_name,
@@ -292,7 +295,7 @@ TEST_F(CreateTableStressTest, RestartMasterDuringCreation) {
     return;
   }
 
-  YBTableName table_name("my_keyspace", "test_table");
+  YBTableName table_name(YQL_DATABASE_CQL, "my_keyspace", "test_table");
   ASSERT_NO_FATALS(CreateBigTable(table_name, FLAGS_num_test_tablets));
 
   for (int i = 0; i < 3; i++) {
@@ -320,7 +323,7 @@ TEST_F(CreateTableStressTest, TestGetTableLocationsOptions) {
     return;
   }
 
-  YBTableName table_name("my_keyspace", "test_table");
+  YBTableName table_name(YQL_DATABASE_CQL, "my_keyspace", "test_table");
   LOG(INFO) << CURRENT_TEST_NAME() << ": Step 1. Creating big table "
             << table_name.ToString() << " ...";
   LOG_TIMING(INFO, "creating big table") {
@@ -454,9 +457,11 @@ TEST_F(CreateTableStressTest, TestConcurrentCreateTableAndReloadMetadata) {
   });
 
   for (int num_tables_created = 0; num_tables_created < 20;) {
-    YBTableName table_name("my_keyspace", Substitute("test-$0", num_tables_created));
+    YBTableName table_name(
+        YQL_DATABASE_CQL, "my_keyspace", Substitute("test-$0", num_tables_created));
     LOG(INFO) << "Creating table " << table_name.ToString();
-    Status s = client_->CreateNamespaceIfNotExists(table_name.namespace_name());
+    Status s = client_->CreateNamespaceIfNotExists(table_name.namespace_name(),
+                                                   table_name.namespace_type());
     if (s.ok()) {
       unique_ptr<YBTableCreator> table_creator(client_->NewTableCreator());
       s = table_creator->table_name(table_name)

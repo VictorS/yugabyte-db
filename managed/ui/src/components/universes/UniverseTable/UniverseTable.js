@@ -12,13 +12,14 @@ import { YBCost } from '../../common/descriptors';
 import { UniverseStatusContainer } from '../../universes';
 import { getUniverseNodes, getPlacementRegions,
         getClusterProviderUUIDs, getProviderMetadata, isKubernetesUniverse } from '../../../utils/UniverseUtils';
-import { isAvailable, showOrRedirect } from 'utils/LayoutUtils';
-const moment = require('moment');
-const pluralize = require('pluralize');
+import { isAvailable, showOrRedirect } from '../../../utils/LayoutUtils';
+
+import pluralize from 'pluralize';
+import moment from 'moment';
 
 export default class UniverseTable extends Component {
 
-  componentWillMount() {
+  componentDidMount() {
     this.props.fetchUniverseMetadata();
     this.props.fetchUniverseTasks();
   }

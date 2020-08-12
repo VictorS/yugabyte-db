@@ -35,6 +35,8 @@
 # Require cmake that includes FindICU module (https://cmake.org/cmake/help/v3.7/release/3.7.html)
 cmake_minimum_required(VERSION 3.7.0)
 
+project(YugabyteDB)
+
 # =================================================================================================
 # Functions
 # =================================================================================================
@@ -104,28 +106,19 @@ function(DETECT_BREW)
   # Detect Linuxbrew. The logic needs to be consistent with the detect_linuxbrew function in
   # common-build-env.sh.
   set(USING_LINUXBREW FALSE)
-  set(USING_CUSTOM_HOMEBREW FALSE)
-  if(APPLE)
-    set(CUSTOM_HOMEBREW_DIR "$ENV{YB_CUSTOM_HOMEBREW_DIR}")
-    if("${CUSTOM_HOMEBREW_DIR}" STREQUAL "")
-      set(CUSTOM_HOMEBREW_DIR "$ENV{HOME}/.linuxbrew-yb-build")
-    endif()
-    if(EXISTS "${CUSTOM_HOMEBREW_DIR}/bin" AND
-       EXISTS "${CUSTOM_HOMEBREW_DIR}/lib")
-      message("Custom Homebrew installation found at ${CUSTOM_HOMEBREW_DIR}")
-      set(USING_CUSTOM_HOMEBREW TRUE)
-    else()
-      message("Not using custom Homebrew: no valid Homebewr installation found at "
-              "${CUSTOM_HOMEBREW_DIR}")
-    endif()
-  else()
+  if(NOT APPLE)
     set(LINUXBREW_DIR "$ENV{YB_LINUXBREW_DIR}")
     if("${LINUXBREW_DIR}" STREQUAL "")
-      set(LINUXBREW_DIR "$ENV{HOME}/.linuxbrew-yb-build")
+      if(EXISTS "${CMAKE_CURRENT_BINARY_DIR}/linuxbrew_path.txt")
+        file(STRINGS "${CMAKE_CURRENT_BINARY_DIR}/linuxbrew_path.txt" LINUXBREW_DIR)
+      else()
+        set(LINUXBREW_DIR "$ENV{HOME}/.linuxbrew-yb-build")
+      endif()
     endif()
     if(EXISTS "${LINUXBREW_DIR}/bin" AND
        EXISTS "${LINUXBREW_DIR}/lib")
       message("Linuxbrew found at ${LINUXBREW_DIR}")
+      set(ENV{YB_LINUXBREW_DIR} "${LINUXBREW_DIR}")
       set(USING_LINUXBREW TRUE)
     else()
       message("Not using Linuxbrew: no valid Linuxbrew installation found at "
@@ -136,17 +129,10 @@ function(DETECT_BREW)
   if(NOT USING_LINUXBREW)
     set(LINUXBREW_DIR "/tmp/not-using-linuxbrew")
   endif()
-  if(NOT USING_CUSTOM_HOMEBREW)
-    set(CUSTOM_HOMEBREW_DIR "/tmp/not-using-custom-homebrew")
-  endif()
 
   set(USING_LINUXBREW "${USING_LINUXBREW}" PARENT_SCOPE)
   set(LINUXBREW_DIR "${LINUXBREW_DIR}" PARENT_SCOPE)
   set(LINUXBREW_LIB_DIR "${LINUXBREW_DIR}/lib" PARENT_SCOPE)
-
-  set(USING_CUSTOM_HOMEBREW "${USING_CUSTOM_HOMEBREW}" PARENT_SCOPE)
-  set(CUSTOM_HOMEBREW_DIR "${CUSTOM_HOMEBREW_DIR}" PARENT_SCOPE)
-  set(CUSTOM_HOMEBREW_LIB_DIR "${CUSTOM_HOMEBREW_DIR}/lib" PARENT_SCOPE)
 endfunction()
 
 # Ensures that the YB_COMPILER_TYPE environment variable matches the auto-detected compiler family.
@@ -209,6 +195,7 @@ function(VALIDATE_COMPILER_TYPE)
   endif()
 
   if (NOT "${COMPILER_FAMILY}" STREQUAL "gcc" AND
+      NOT "${COMPILER_FAMILY}" STREQUAL "gcc8" AND
       NOT "${COMPILER_FAMILY}" STREQUAL "clang")
     message(FATAL_ERROR "Unknown compiler family: ${COMPILER_FAMILY} (expected 'gcc' or 'clang').")
   endif()
@@ -219,7 +206,7 @@ function(VALIDATE_COMPILER_TYPE)
   endif()
 
   set(IS_GCC FALSE PARENT_SCOPE)
-  if ("${COMPILER_FAMILY}" STREQUAL "gcc")
+  if ("${COMPILER_FAMILY}" STREQUAL "gcc" OR "${COMPILER_FAMILY}" STREQUAL "gcc8")
     set(IS_GCC TRUE PARENT_SCOPE)
   endif()
 endfunction()
@@ -230,7 +217,9 @@ endfunction()
 # CMAKE_EXE_LINKER_FLAGS and CMAKE_SHARED_LINKER_FLAGS after we finish making changes to this.
 # These flags apply to both YB and RocksDB parts of the codebase.
 function(ADD_LINKER_FLAGS FLAGS)
-  message("Adding to linker flags: ${FLAGS}")
+  if ($ENV{YB_VERBOSE})
+    message("Adding to linker flags: ${FLAGS}")
+  endif()
   set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${FLAGS}" PARENT_SCOPE)
   set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} ${FLAGS}" PARENT_SCOPE)
 endfunction()
@@ -262,9 +251,13 @@ endfunction()
 #     hard to debug crashes.
 
 function(ADD_CXX_FLAGS FLAGS)
-  message("Adding C++ flags: ${FLAGS}")
+  if ($ENV{YB_VERBOSE})
+    message("Adding C++ flags: ${FLAGS}")
+  endif()
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${FLAGS}" PARENT_SCOPE)
 endfunction()
+
+DETECT_BREW()
 
 ADD_CXX_FLAGS("-Werror")
 ADD_CXX_FLAGS("-fno-strict-aliasing -msse4.2 -Wall -Wno-sign-compare -Wno-deprecated")
@@ -427,6 +420,7 @@ get_filename_component(YB_BUILD_ROOT_BASENAME "${CMAKE_CURRENT_BINARY_DIR}" NAME
 string(REPLACE "-" ";" YB_BUILD_ROOT_BASENAME_COMPONENTS ${YB_BUILD_ROOT_BASENAME})
 list(GET YB_BUILD_ROOT_BASENAME_COMPONENTS 0 YB_BUILD_TYPE)
 message("YB_BUILD_TYPE: ${YB_BUILD_TYPE}")
+message("CMAKE_MAKE_PROGRAM: ${CMAKE_MAKE_PROGRAM}")
 
 # CMAKE_LINK_DEPENDS_NO_SHARED prevents prevent re-linking dependents of a shared library when it
 # is re-linked. Enabling the optimized behavior by default, and allowing to customize it with the
@@ -450,7 +444,12 @@ message("YB_SRC_ROOT: ${YB_SRC_ROOT}")
 
 set(YB_THIRDPARTY_DIR "$ENV{YB_THIRDPARTY_DIR}")
 if("${YB_THIRDPARTY_DIR}" STREQUAL "")
-  set(YB_THIRDPARTY_DIR "${YB_SRC_ROOT}/thirdparty")
+  if(EXISTS "${CMAKE_CURRENT_BINARY_DIR}/thirdparty_path.txt")
+    file(STRINGS "${CMAKE_CURRENT_BINARY_DIR}/thirdparty_path.txt" YB_THIRDPARTY_DIR)
+  else()
+    set(YB_THIRDPARTY_DIR "${YB_SRC_ROOT}/thirdparty")
+  endif()
+  set(ENV{YB_THIRDPARTY_DIR} "${YB_THIRDPARTY_DIR}")
 endif()
 message("YB_THIRDPARTY_DIR: ${YB_THIRDPARTY_DIR}")
 
@@ -508,7 +507,7 @@ if (NOT "$ENV{YB_DISABLE_LATEST_SYMLINK}" STREQUAL "1")
 endif()
 
 add_custom_target(dummy_target ALL
-  cat /dev/null
+  COMMAND cat /dev/null
   COMMENT "Dummy target for dependency resolution testing")
 
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake_modules")
@@ -524,6 +523,11 @@ set(CMAKE_SKIP_INSTALL_ALL_DEPENDENCY true)
 # environment variables correctly.
 if ("${YB_NO_REBUILD_THIRDPARTY}" STREQUAL "1")
   set(ENV{NO_REBUILD_THIRDPARTY} "1")
+else()
+  # Do not try building thirdparty outside our source location
+  if(NOT "${YB_THIRDPARTY_DIR}" STREQUAL "${YB_SRC_ROOT}/thirdparty")
+    set(ENV{NO_REBUILD_THIRDPARTY} "1")
+  endif()
 endif()
 
 INIT_COMPILER_TYPE()
@@ -535,8 +539,13 @@ elseif (YB_USE_ASAN)
   set(THIRDPARTY_INSTRUMENTATION_TYPE "asan")
 elseif ("$ENV{YB_COMPILER_TYPE}" STREQUAL "clang") # Cannot use IS_CLANG before building 3rd party
   set(THIRDPARTY_INSTRUMENTATION_TYPE "clang_uninstrumented")
-else()
+elseif ("$ENV{YB_COMPILER_TYPE}" STREQUAL "gcc8")
+  set(THIRDPARTY_INSTRUMENTATION_TYPE "gcc8_uninstrumented")
+  ADD_LINKER_FLAGS("-L${LINUXBREW_LIB_DIR}/gcc/8")
+elseif ("$ENV{YB_COMPILER_TYPE}" STREQUAL "gcc")
   set(THIRDPARTY_INSTRUMENTATION_TYPE "uninstrumented")
+else()
+  message(FATAL_ERROR "Not handled compiler family: ${COMPILER_FAMILY}.")
 endif()
 
 # Make sure thirdparty stuff is up-to-date.
@@ -566,7 +575,7 @@ endif()
 # Build type (debug, release, fastdebug, etc.)
 # -------------------------------------------------------------------------------------------------
 
-# If no build build type is specified, default to debug builds
+# If no build type is specified, default to debug builds
 if (NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Debug)
 endif(NOT CMAKE_BUILD_TYPE)
@@ -600,7 +609,6 @@ endif()
 ADD_CXX_FLAGS("-DYB_COMPILER_TYPE=$ENV{YB_COMPILER_TYPE}")
 ADD_CXX_FLAGS("-DYB_COMPILER_VERSION=${COMPILER_VERSION}")
 ADD_CXX_FLAGS("-DROCKSDB_LIB_IO_POSIX")
-ADD_CXX_FLAGS("-DBZIP2")
 ADD_CXX_FLAGS("-DSNAPPY")
 ADD_CXX_FLAGS("-DZLIB")
 if ($ENV{YB_COMPILER_TYPE} STREQUAL "zapcc")
@@ -665,7 +673,6 @@ if(IS_CLANG)
   # The actual static analysis is turned on using the --analyze flag.
 endif()
 
-DETECT_BREW()
 if(USING_LINUXBREW AND IS_CLANG)
   # We only need these when building using clang. If we use Linuxbrew's gcc, it should set the
   # equivalent of these options automatically.
@@ -685,9 +692,6 @@ if(USING_LINUXBREW)
   # This is needed for finding correct versions of Flex, Bison, and other tools.
   set(CMAKE_PREFIX_PATH "${LINUXBREW_DIR}" ${CMAKE_PREFIX_PATH})
 endif()
-if(USING_CUSTOM_HOMEBREW)
-  set(CMAKE_PREFIX_PATH "${CUSTOM_HOMEBREW_DIR}" ${CMAKE_PREFIX_PATH})
-endif()
 
 # For both RocksDB and YugaByte code, we need to set the OS flag on Mac. Some code in RocksDB also
 # distinguishes further into BSD vs everything else, but we probably do not care further.
@@ -699,16 +703,6 @@ elseif(NOT "${USING_SANITIZERS}")
 else()
   message("Not specifying linker flags to not allow any undefined symbols: this is ASAN/TSAN")
 endif()
-
-# Explicitly disable the new gcc5 ABI. Until clang supports abi tags [1], any
-# generated code (which always uses clang) must be built against the old ABI.
-# (Note: we are not using any LLVM codegen in YugaByte as of 08/2016).
-# There's no recourse for using both ABIs in the same process; gcc's advice [2]
-# is to build everything against the old ABI.
-#
-# 1. https://llvm.org/bugs/show_bug.cgi?id=23529
-# 2. https://gcc.gnu.org/onlinedocs/libstdc++/manual/using_dual_abi.html
-ADD_CXX_FLAGS(-D_GLIBCXX_USE_CXX11_ABI=0)
 
 # We don't want to use any stubs; that's exclusively for builds using our
 # exported client headers).
@@ -762,7 +756,7 @@ endif()
 message("Configured for ${CMAKE_BUILD_TYPE} build "
         "(set with cmake -DCMAKE_BUILD_TYPE={release,debug,...})")
 if ("${CMAKE_BUILD_TYPE}" STREQUAL "DEBUG")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${CXX_FLAGS_DEBUG}")
+  ADD_CXX_FLAGS("${CXX_FLAGS_DEBUG}")
   if(NOT APPLE AND EXISTS "/usr/bin/ld.gold")
     if ("$ENV{YB_NO_LD_GOLD}")
       message("YB_NO_LD_GOLD is defined, not using ld.gold")
@@ -777,15 +771,15 @@ if ("${CMAKE_BUILD_TYPE}" STREQUAL "DEBUG")
     endif()
   endif()
 elseif ("${CMAKE_BUILD_TYPE}" STREQUAL "FASTDEBUG")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${CXX_FLAGS_FASTDEBUG}")
+  ADD_CXX_FLAGS("${CXX_FLAGS_FASTDEBUG}")
   # We specify RocksDB debug level that corresponds to the -O1 optimization level, the same as
   # the rest of YB code in the "fastdebug" mode (used for ASAN/TSAN).
 elseif ("${CMAKE_BUILD_TYPE}" STREQUAL "RELEASE")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${CXX_FLAGS_RELEASE}")
+  ADD_CXX_FLAGS("${CXX_FLAGS_RELEASE}")
 elseif ("${CMAKE_BUILD_TYPE}" STREQUAL "PROFILE_GEN")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${CXX_FLAGS_PROFILE_GEN}")
+  ADD_CXX_FLAGS("${CXX_FLAGS_PROFILE_GEN}")
 elseif ("${CMAKE_BUILD_TYPE}" STREQUAL "PROFILE_BUILD")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${CXX_FLAGS_PROFILE_BUILD}")
+  ADD_CXX_FLAGS("${CXX_FLAGS_PROFILE_BUILD}")
 else()
   message(FATAL_ERROR "Unknown build type: ${CMAKE_BUILD_TYPE}")
 endif ()
@@ -819,7 +813,7 @@ if (IS_CLANG)
   else()
     message("Running without a controlling terminal or in a dumb terminal")
   endif()
-elseif("${COMPILER_FAMILY}" STREQUAL "gcc")
+elseif("${COMPILER_FAMILY}" STREQUAL "gcc" OR "${COMPILER_FAMILY}" STREQUAL "gcc8")
   # Blacklist gcc versions known to generate broken optimized code.
   #
   # See KUDU-1030 for more details.
@@ -914,11 +908,10 @@ if (${YB_USE_UBSAN})
   set(CXX_NO_SANITIZE_FLAG "alignment")
   if(NOT APPLE)
     set(CXX_NO_SANITIZE_FLAG "${CXX_NO_SANITIZE_FLAG},vptr")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=undefined")
+    ADD_CXX_FLAGS("-fsanitize=undefined")
   endif()
-  set(CMAKE_CXX_FLAGS
-    "${CMAKE_CXX_FLAGS} -fno-sanitize-recover=all -fno-sanitize=${CXX_NO_SANITIZE_FLAG}")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize-recover=float-cast-overflow")
+  ADD_CXX_FLAGS("-fno-sanitize-recover=all -fno-sanitize=${CXX_NO_SANITIZE_FLAG}")
+  ADD_CXX_FLAGS("-fsanitize-recover=float-cast-overflow")
 endif ()
 
 if ("${YB_USE_UBSAN}" OR "${YB_USE_ASAN}" OR "${YB_USE_TSAN}")
@@ -946,7 +939,7 @@ if ("${YB_GENERATE_COVERAGE}")
     # This should be fixed in llvm 3.4 with http://llvm.org/viewvc/llvm-project?view=revision&revision=184666
     message(SEND_ERROR "Cannot currently generate coverage with clang")
   endif()
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} --coverage -DCOVERAGE_BUILD")
+  ADD_CXX_FLAGS("--coverage -DCOVERAGE_BUILD")
 
   # For coverage to work properly, we need to use static linkage. Otherwise,
   # __gcov_flush() doesn't properly flush coverage from every module.
@@ -1217,6 +1210,7 @@ function(ADD_YB_TEST REL_TEST_NAME)
     PROPERTIES
     TEST_BINARY_PATH "${TEST_PATH}"
   )
+  set_target_properties(${TEST_BINARY_NAME} PROPERTIES COMPILE_FLAGS "-DDISABLE_STATUS_NODISCARD")
 
   if(ARGN)
     set_tests_properties(${TEST_NAME} PROPERTIES ${ARGN})
@@ -1305,9 +1299,8 @@ function(ADD_THIRDPARTY_LIB LIB_NAME)
 endfunction()
 
 # Look in thirdparty prefix paths before anywhere else for system dependencies.
-# TODO: get rid of unnecessary variables.
-set(THIRDPARTY_PREFIX ${YB_PREFIX_COMMON})
-set(CMAKE_PREFIX_PATH ${THIRDPARTY_PREFIX} ${CMAKE_PREFIX_PATH})
+set(CMAKE_PREFIX_PATH ${YB_PREFIX_COMMON} ${CMAKE_PREFIX_PATH})
+ADD_LINKER_FLAGS("-L${YB_PREFIX_COMMON}/lib")
 
 set(YB_THIRDPARTY_INSTALLED_DEPS_DIR
     "${YB_THIRDPARTY_DIR}/installed/${THIRDPARTY_INSTRUMENTATION_TYPE}")
@@ -1332,25 +1325,8 @@ if(IS_CLANG AND NOT "$ENV{YB_CLANG_PREFIX}" STREQUAL "")
 endif()
 
 # -------------------------------------------------------------------------------------------------
-# Common setup allowing us to use Homebrew libraries on Darwin
-# -------------------------------------------------------------------------------------------------
-
-if(APPLE)
-  if ("$ENV{YB_CUSTOM_HOMEBREW_DIR}" STREQUAL "")
-    set(HOMEBREW_OPT_DIR "/usr/local/opt")
-  else()
-    set(HOMEBREW_OPT_DIR "$ENV{YB_CUSTOM_HOMEBREW_DIR}/opt")
-  endif()
-  message("HOMEBREW_OPT_DIR is ${HOMEBREW_OPT_DIR}")
-endif()
-
-# -------------------------------------------------------------------------------------------------
 
 ## OpenSSL
-if(APPLE)
-  set(OPENSSL_ROOT_DIR "${HOMEBREW_OPT_DIR}/openssl")
-  message("Setting OPENSSL_ROOT_DIR to ${OPENSSL_ROOT_DIR}")
-endif()
 
 find_package(OpenSSL REQUIRED)
 include_directories(SYSTEM ${OPENSSL_INCLUDE_DIR})
@@ -1358,35 +1334,19 @@ ADD_THIRDPARTY_LIB(openssl
   SHARED_LIB "${OPENSSL_CRYPTO_LIBRARY}"
   DEPS ${OPENSSL_LIB_DEPS})
 
-if (USING_CUSTOM_HOMEBREW)
-  # This is a work-around for the FindOpenSSL CMake module not finding OpenSSL inside a custom
-  # Homebrew installation directory. Instead, it finds OpenSSL in /usr/local/
-  if ("${OPENSSL_CRYPTO_LIBRARY}" MATCHES "^/usr/lib/.*")
-    set(OLD_OPENSSL_CRYPTO_LIBRARY "${OPENSSL_CRYPTO_LIBRARY}")
-    string(REGEX REPLACE "^/usr/" "${OPENSSL_ROOT_DIR}/"
-           OPENSSL_CRYPTO_LIBRARY "${OPENSSL_CRYPTO_LIBRARY}")
-    message("Auto-corrected OPENSSL_CRYPTO_LIBRARY from ${OLD_OPENSSL_CRYPTO_LIBRARY} to "
-            "${OPENSSL_CRYPTO_LIBRARY}")
-  endif()
-  if ("${OPENSSL_SSL_LIBRARY}" MATCHES "^/usr/lib/.*")
-    set(OLD_OPENSSL_SSL_LIBRARY "${OPENSSL_SSL_LIBRARY}")
-    string(REGEX REPLACE "^/usr/" "${OPENSSL_ROOT_DIR}/"
-           OPENSSL_SSL_LIBRARY  "${OPENSSL_SSL_LIBRARY}")
-    message("Auto-corrected OPENSSL_SSL_LIBRARY from ${OLD_OPENSSL_SSL_LIBRARY} to "
-            "${OPENSSL_SSL_LIBRARY}")
-  endif()
-  set(OPENSSL_LIBRARIES "${OPENSSL_CRYPTO_LIBRARY}" "${OPENSSL_SSL_LIBRARY}")
-  # Unset OpenSSL version because it might not be correct after we manually modified library
-  # paths. However, we are not using this variable anywhere.
-  unset(OPENSSL_VERSION)
-endif()
-
 message("OPENSSL_CRYPTO_LIBRARY=${OPENSSL_CRYPTO_LIBRARY}")
 message("OPENSSL_SSL_LIBRARY=${OPENSSL_SSL_LIBRARY}")
 message("OPENSSL_FOUND=${OPENSSL_FOUND}")
 message("OPENSSL_INCLUDE_DIR=${OPENSSL_INCLUDE_DIR}")
 message("OPENSSL_LIBRARIES=${OPENSSL_LIBRARIES}")
 message("OPENSSL_VERSION=${OPENSSL_VERSION}")
+
+if (NOT "${OPENSSL_CRYPTO_LIBRARY}" MATCHES "^${YB_THIRDPARTY_DIR}/.*")
+  message(FATAL_ERROR "OPENSSL_CRYPTO_LIBRARY not in ${YB_THIRDPARTY_DIR}.")
+endif()
+if (NOT "${OPENSSL_SSL_LIBRARY}" MATCHES "^${YB_THIRDPARTY_DIR}/.*")
+  message(FATAL_ERROR "OPENSSL_SSL_LIBRARY not in ${YB_THIRDPARTY_DIR}.")
+endif()
 
 ## GLog
 find_package(GLog REQUIRED)
@@ -1414,12 +1374,7 @@ if (NOT APPLE)
     STATIC_LIB "${UNWIND_STATIC_ARCH_LIB}"
     SHARED_LIB "${UNWIND_SHARED_ARCH_LIB}")
   list(APPEND YB_BASE_LIBS unwind)
-endif()
 
-# libuuid
-# We only need it on macOS and on Linux when using Linuxbrew. When building on Ubuntu 17.10+ without
-# Linuxbrew, libuuid is found in default include/library paths.
-if (USING_LINUXBREW)
   find_package(LibUuid REQUIRED)
   include_directories(SYSTEM ${LIBUUID_INCLUDE_DIR})
   ADD_THIRDPARTY_LIB(libuuid
@@ -1482,11 +1437,6 @@ endif()
 find_package(Lz4 REQUIRED)
 include_directories(SYSTEM ${LZ4_INCLUDE_DIR})
 ADD_THIRDPARTY_LIB(lz4 STATIC_LIB "${LZ4_STATIC_LIB}")
-
-## Bitshuffle
-find_package(Bitshuffle REQUIRED)
-include_directories(SYSTEM ${BITSHUFFLE_INCLUDE_DIR})
-ADD_THIRDPARTY_LIB(bitshuffle STATIC_LIB "${BITSHUFFLE_STATIC_LIB}")
 
 ## ZLib
 find_package(Zlib REQUIRED)
@@ -1617,9 +1567,6 @@ foreach(IDX RANGE ${LAST_IDX})
 endforeach()
 include_directories(SYSTEM ${Boost_INCLUDE_DIR})
 
-if(APPLE)
-  set(ICU_ROOT "${HOMEBREW_OPT_DIR}/icu4c")
-endif()
 find_package(ICU COMPONENTS i18n uc REQUIRED)
 include_directories(SYSTEM ${ICU_INCLUDE_DIRS})
 ADD_THIRDPARTY_LIB(icui18n
@@ -1723,14 +1670,24 @@ set(CMAKE_C_FLAGS "${CMAKE_CXX_FLAGS}")
 if ("${COMPILER_FAMILY}" STREQUAL "gcc" AND
     ${CMAKE_CXX_COMPILER_VERSION} VERSION_GREATER 7.0)
   # Used with GCC 7.
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -faligned-new")
+  ADD_CXX_FLAGS("-faligned-new")
 endif()
 
+string (REPLACE "-Werror=non-virtual-dtor" "" CMAKE_C_FLAGS ${CMAKE_C_FLAGS})
+string (REPLACE "-Werror=reorder" "" CMAKE_C_FLAGS ${CMAKE_C_FLAGS})
 string (REPLACE "-Wnon-virtual-dtor" "" CMAKE_C_FLAGS ${CMAKE_C_FLAGS})
 string (REPLACE "-Woverloaded-virtual" "" CMAKE_C_FLAGS ${CMAKE_C_FLAGS})
 
-# TODO: switch to C++17.
+
+message("CMAKE_C_FLAGS ${CMAKE_C_FLAGS}")
+
 set(CMAKE_CXX_STANDARD 14)
+
+if ("${COMPILER_FAMILY}" STREQUAL "gcc8")
+  # Remove after switching to C++17
+  ADD_CXX_FLAGS("-Wno-aligned-new")
+endif()
+
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 if (USING_LINUXBREW)
@@ -1739,12 +1696,18 @@ if (USING_LINUXBREW)
   ADD_GLOBAL_RPATH_ENTRY("${LINUXBREW_LIB_DIR}")
   ADD_LINKER_FLAGS("-L/usr/lib64")
   ADD_GLOBAL_RPATH_ENTRY("/usr/lib64")
-elseif(APPLE)
-  ADD_LINKER_FLAGS("-L${ICU_ROOT}/lib")
-  ADD_GLOBAL_RPATH_ENTRY("${ICU_ROOT}/lib")
 endif()
 
 message("Linker flags: ${CMAKE_EXE_LINKER_FLAGS}")
+
+set(PQ_SHARED_LIB
+    "${YB_BUILD_ROOT}/postgres/lib/libpq${YB_SHARED_LIBRARY_SUFFIX}")
+set(YB_PGBACKEND_SHARED_LIB 
+    "${YB_BUILD_ROOT}/postgres/lib/libyb_pgbackend${YB_SHARED_LIBRARY_SUFFIX}")
+
+# -------------------------------------------------------------------------------------------------
+# Subdirectories
+# -------------------------------------------------------------------------------------------------
 
 add_subdirectory(src/yb/rocksdb)
 add_subdirectory(src/yb/gutil)
@@ -1772,6 +1735,10 @@ add_subdirectory(src/yb/cdc)
 add_subdirectory(src/postgres)
 
 include("${YB_SRC_ROOT}/ent/CMakeLists.txt")
+
+# ------------------------------------------------------------------------------------------------
+# Utilities for collecting the dependency graph
+# ------------------------------------------------------------------------------------------------
 
 # We could not accumulate multiple lines in YB_ALL_DEPS due to a CMake bug with cache variables,
 # but we can write multiple lines in the output file.

@@ -17,9 +17,9 @@
 #include "yb/server/hybrid_clock.h"
 #include "yb/server/secure.h"
 
+#include "yb/rpc/rpc.h"
 #include "yb/tserver/backup_service.h"
 #include "yb/tserver/cdc_consumer.h"
-#include "yb/tserver/header_manager_impl.h"
 #include "yb/tserver/tablet_server.h"
 #include "yb/tserver/ts_tablet_manager.h"
 
@@ -28,6 +28,7 @@
 #include "yb/util/ntp_clock.h"
 #include "yb/util/encrypted_file_factory.h"
 #include "yb/util/universe_key_manager.h"
+#include "yb/util/header_manager_impl.h"
 
 #include "yb/rocksutil/rocksdb_encrypted_file_factory.h"
 
@@ -69,7 +70,7 @@ void TabletServer::Shutdown() {
 
 Status TabletServer::RegisterServices() {
 #if !defined(__APPLE__)
-  server::HybridClock::RegisterProvider(NtpClock::Name(), [] {
+  server::HybridClock::RegisterProvider(NtpClock::Name(), [](const std::string&) {
     return std::make_shared<NtpClock>();
   });
 #endif
@@ -80,7 +81,7 @@ Status TabletServer::RegisterServices() {
 
   RETURN_NOT_OK(RpcAndWebServerBase::RegisterService(
       FLAGS_svc_queue_length_default,
-      std::make_unique<CDCServiceImpl>(tablet_manager_.get(), metric_entity())));
+      std::make_unique<CDCServiceImpl>(tablet_manager_.get(), metric_entity(), metric_registry())));
 
   return super::RegisterServices();
 }
@@ -88,7 +89,7 @@ Status TabletServer::RegisterServices() {
 Status TabletServer::SetupMessengerBuilder(rpc::MessengerBuilder* builder) {
   RETURN_NOT_OK(super::SetupMessengerBuilder(builder));
   secure_context_ = VERIFY_RESULT(server::SetupSecureContext(
-      options_.rpc_opts.rpc_bind_addresses, fs_manager_.get(),
+      options_.rpc_opts.rpc_bind_addresses, *fs_manager_,
       server::SecureContextType::kServerToServer, builder));
   return Status::OK();
 }

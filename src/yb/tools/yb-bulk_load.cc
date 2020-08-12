@@ -25,11 +25,13 @@
 #include "yb/common/hybrid_time.h"
 #include "yb/common/jsonb.h"
 #include "yb/common/ql_protocol.pb.h"
+#include "yb/common/ql_value.h"
 #include "yb/common/schema.h"
 #include "yb/common/wire_protocol.h"
 #include "yb/docdb/cql_operation.h"
 #include "yb/docdb/doc_operation.h"
 #include "yb/docdb/docdb.h"
+#include "yb/master/master_util.h"
 #include "yb/rocksdb/db.h"
 #include "yb/rocksdb/options.h"
 #include "yb/rpc/messenger.h"
@@ -202,13 +204,13 @@ Status BulkLoadTask::PopulateColumnValue(const string &column,
     YB_SET_INT_VALUE(ql_valuepb, column, 32);
     YB_SET_INT_VALUE(ql_valuepb, column, 64);
     case DataType::FLOAT: {
-      auto value = util::CheckedStold(column);
+      auto value = CheckedStold(column);
       RETURN_NOT_OK(value);
       ql_valuepb->set_float_value(*value);
       break;
     }
     case DataType::DOUBLE: {
-      auto value = util::CheckedStold(column);
+      auto value = CheckedStold(column);
       RETURN_NOT_OK(value);
       ql_valuepb->set_double_value(*value);
       break;
@@ -309,7 +311,8 @@ Status BulkLoadTask::InsertRow(const string &row,
   // Comment from PritamD: Don't need cross shard transaction support in bulk load, but I guess
   // once we have secondary indexes we probably might need to ensure bulk load builds the indexes
   // as well.
-  docdb::QLWriteOperation op(schema, index_map, nullptr /* unique_index_key_schema */, boost::none);
+  docdb::QLWriteOperation op(std::shared_ptr<const Schema>(&schema, [](const Schema*){}),
+                             index_map, nullptr /* unique_index_key_schema */, boost::none);
   RETURN_NOT_OK(op.Init(&req, &resp));
   RETURN_NOT_OK(op.Apply({
       doc_write_batch,
@@ -483,7 +486,8 @@ CHECKED_STATUS BulkLoad::InitDBUtil(const TabletId &tablet_id) {
 Status BulkLoad::InitYBBulkLoad() {
   // Convert table_name to lowercase since we store table names in lowercase.
   string table_name_lower = boost::to_lower_copy(FLAGS_table_name);
-  YBTableName table_name(FLAGS_namespace_name, table_name_lower);
+  YBTableName table_name(
+      master::GetDefaultDatabaseType(FLAGS_namespace_name), FLAGS_namespace_name, table_name_lower);
 
   YBClientBuilder builder;
   builder.add_master_server_addr(FLAGS_master_addresses);

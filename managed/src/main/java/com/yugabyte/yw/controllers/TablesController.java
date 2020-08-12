@@ -4,9 +4,13 @@ package com.yugabyte.yw.controllers;
 
 import java.util.List;
 import java.util.UUID;
+import java.util.Arrays;
+import java.util.Map;
+import java.util.HashMap;
 
 import com.yugabyte.yw.commissioner.Commissioner;
 import com.yugabyte.yw.commissioner.Common;
+import com.yugabyte.yw.commissioner.tasks.MultiTableBackup;
 import com.yugabyte.yw.commissioner.tasks.subtasks.DeleteTableFromUniverse;
 import com.yugabyte.yw.forms.BackupTableParams;
 import com.yugabyte.yw.forms.BulkImportParams;
@@ -21,6 +25,8 @@ import org.yb.client.GetTableSchemaResponse;
 import org.yb.client.ListTablesResponse;
 import org.yb.client.YBClient;
 import org.yb.master.Master.ListTablesResponsePB.TableInfo;
+import org.yb.master.Master.RelationType;
+import org.yb.Common.TableType;
 
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -90,6 +96,7 @@ public class TablesController extends AuthenticatedController {
 
       ObjectNode resultNode = Json.newObject();
       resultNode.put("taskUUID", taskUUID.toString());
+      Audit.createAuditEntry(ctx(), request(), Json.toJson(formData.data()));
       return Results.status(OK, resultNode);
     } catch (NullPointerException e) {
       LOG.error("Error creating table", e);
@@ -166,6 +173,7 @@ public class TablesController extends AuthenticatedController {
 
       ObjectNode resultNode = Json.newObject();
       resultNode.put("taskUUID", taskUUID.toString());
+      Audit.createAuditEntry(ctx(), request(), taskUUID);
       return ok(resultNode);
     } catch (Exception e) {
       LOG.error("Failed to get list of tables in universe " + universeUUID, e);
@@ -228,6 +236,7 @@ public class TablesController extends AuthenticatedController {
           node.put("tableName", table.getName());
           String tableUUID = table.getId().toStringUtf8();
           node.put("tableUUID", String.valueOf(getUUIDRepresentation(tableUUID)));
+          node.put("isIndexTable", table.getRelationType() == RelationType.INDEX_TABLE_RELATION);
           resultNode.add(node);
         }
       }
@@ -280,6 +289,68 @@ public class TablesController extends AuthenticatedController {
     }
   }
 
+  public Result createMultiTableBackup(UUID customerUUID, UUID universeUUID) {
+    Customer customer = Customer.get(customerUUID);
+    if (customer == null) {
+      String errMsg = "Invalid Customer UUID: " + customerUUID;
+      return ApiResponse.error(BAD_REQUEST, errMsg);
+    }
+
+    Universe universe = Universe.get(universeUUID);
+    Form<MultiTableBackup.Params> formData = formFactory
+        .form(MultiTableBackup.Params.class)
+        .bindFromRequest();
+
+    if (formData.hasErrors()) {
+      return ApiResponse.error(BAD_REQUEST, formData.errorsAsJson());
+    }
+
+    MultiTableBackup.Params taskParams = formData.get();
+    if (taskParams.storageConfigUUID == null) {
+      String errMsg = "Missing StorageConfig UUID: " + taskParams.storageConfigUUID;
+      return ApiResponse.error(BAD_REQUEST, errMsg);
+    }
+    CustomerConfig storageConfig = CustomerConfig.get(customerUUID, taskParams.storageConfigUUID);
+    if (storageConfig == null) {
+      String errMsg = "Invalid StorageConfig UUID: " + taskParams.storageConfigUUID;
+      return ApiResponse.error(BAD_REQUEST, errMsg);
+    }
+
+    taskParams.universeUUID = universeUUID;
+    taskParams.customerUUID = customerUUID;
+
+    if (disableBackupOnTables(taskParams.tableUUIDList, universe)) {
+      String errMsg = "Invalid Table List, found index or YSQL table.";
+      return ApiResponse.error(BAD_REQUEST, errMsg);
+    }
+    ObjectNode resultNode = Json.newObject();
+    if (taskParams.schedulingFrequency != 0L || taskParams.cronExpression != null) {
+      Schedule schedule = Schedule.create(customerUUID, taskParams,
+          TaskType.MultiTableBackup, taskParams.schedulingFrequency,
+          taskParams.cronExpression);
+      UUID scheduleUUID = schedule.getScheduleUUID();
+      LOG.info("Submitted universe backup to be scheduled {}, schedule uuid = {}.",
+          universeUUID, scheduleUUID);
+      resultNode.put("scheduleUUID", scheduleUUID.toString());
+      Audit.createAuditEntry(ctx(), request(), Json.toJson(formData.data()));
+    } else {
+      UUID taskUUID = commissioner.submit(TaskType.MultiTableBackup, taskParams);
+      LOG.info("Submitted task to universe {}, task uuid = {}.",
+          universe.name, taskUUID);
+      CustomerTask.create(customer,
+          customerUUID,
+          taskUUID,
+          CustomerTask.TargetType.Universe,
+          CustomerTask.TaskType.Backup,
+          universe.name);
+      LOG.info("Saved task uuid {} in customer tasks for universe {}", taskUUID,
+          universe.name);
+      resultNode.put("taskUUID", taskUUID.toString());
+      Audit.createAuditEntry(ctx(), request(), Json.toJson(formData.data()), taskUUID);
+    }
+    return ApiResponse.success(resultNode);
+  }
+
   public Result createBackup(UUID customerUUID, UUID universeUUID, UUID tableUUID) {
     Customer customer = Customer.get(customerUUID);
     if (customer == null) {
@@ -287,10 +358,12 @@ public class TablesController extends AuthenticatedController {
       return ApiResponse.error(BAD_REQUEST, errMsg);
     }
     Universe universe = Universe.get(universeUUID);
-    if (universe == null) {
-      String errMsg = "Invalid Universe UUID: " + universeUUID;
+
+    if (disableBackupOnTables(Arrays.asList(tableUUID), universe)) {
+      String errMsg = "Invalid Table UUID: " + tableUUID + ". Cannot backup index or YSQL table.";
       return ApiResponse.error(BAD_REQUEST, errMsg);
     }
+
     Form<BackupTableParams> formData = formFactory.form(BackupTableParams.class)
         .bindFromRequest();
 
@@ -307,16 +380,17 @@ public class TablesController extends AuthenticatedController {
 
     taskParams.universeUUID = universeUUID;
     taskParams.tableUUID = tableUUID;
-    // taskParams.schedulingFrequency = 600000;
 
     ObjectNode resultNode = Json.newObject();
-    if (taskParams.schedulingFrequency != 0L) {
+    if (taskParams.schedulingFrequency != 0L || taskParams.cronExpression != null) {
       Schedule schedule = Schedule.create(customerUUID, taskParams,
-          TaskType.BackupUniverse, taskParams.schedulingFrequency);
+          TaskType.BackupUniverse, taskParams.schedulingFrequency,
+          taskParams.cronExpression);
       UUID scheduleUUID = schedule.getScheduleUUID();
       LOG.info("Submitted backup to be scheduled {}:{}, schedule uuid = {}.",
           tableUUID, taskParams.tableName, scheduleUUID);
       resultNode.put("scheduleUUID", scheduleUUID.toString());
+      Audit.createAuditEntry(ctx(), request(), Json.toJson(formData.data()));
     } else {
       Backup backup = Backup.create(customerUUID, taskParams);
       UUID taskUUID = commissioner.submit(TaskType.BackupUniverse, taskParams);
@@ -326,12 +400,13 @@ public class TablesController extends AuthenticatedController {
       CustomerTask.create(customer,
           taskParams.universeUUID,
           taskUUID,
-          CustomerTask.TargetType.Backup,
-          CustomerTask.TaskType.Create,
+          CustomerTask.TargetType.Table,
+          CustomerTask.TaskType.Backup,
           taskParams.tableName);
       LOG.info("Saved task uuid {} in customer tasks table for table {}:{}.{}", taskUUID,
           tableUUID, taskParams.keyspace, taskParams.tableName);
       resultNode.put("taskUUID", taskUUID.toString());
+      Audit.createAuditEntry(ctx(), request(), Json.toJson(formData.data()), taskUUID);
     }
     return ApiResponse.success(resultNode);
   }
@@ -359,6 +434,12 @@ public class TablesController extends AuthenticatedController {
         LOG.error(errMsg);
         return ApiResponse.error(BAD_REQUEST, errMsg);
       }
+
+      if (disableBackupOnTables(Arrays.asList(tableUUID), universe)) {
+        String errMsg = "Invalid Table UUID: " + tableUUID + ". Cannot backup index or YSQL table.";
+        return ApiResponse.error(BAD_REQUEST, errMsg);
+      }
+
       // TODO: undo hardcode to AWS (required right now due to using EMR).
       Common.CloudType cloudType = universe.getUniverseDetails().getPrimaryCluster().userIntent.providerType;
       if (cloudType != aws) {
@@ -399,12 +480,47 @@ public class TablesController extends AuthenticatedController {
 
       ObjectNode resultNode = Json.newObject();
       resultNode.put("taskUUID", taskUUID.toString());
+      Audit.createAuditEntry(ctx(), request(), Json.toJson(formData.data()), taskUUID);
       return ApiResponse.success(resultNode);
     } catch (Exception e) {
       String errMsg = "Failed to bulk import data into table " + tableUUID + " in universe "
           + universeUUID;
       LOG.error(errMsg, e);
       return ApiResponse.error(INTERNAL_SERVER_ERROR, e.getMessage());
+    }
+  }
+
+  public boolean disableBackupOnTables(List<UUID> tableUuids, Universe universe) {
+    if (tableUuids.isEmpty()) {
+      return false;
+    }
+
+    final String masterAddresses = universe.getMasterAddresses(true);
+    if (masterAddresses.isEmpty()) {
+      String errMsg = "Masters are not currently queryable.";
+      LOG.warn(errMsg);
+      return false;
+    }
+    String certificate = universe.getCertificate();
+    YBClient client = null;
+
+    try {
+      client = ybService.getClient(masterAddresses, certificate);
+      ListTablesResponse response = client.getTablesList();
+      List<TableInfo> tableInfoList = response.getTableInfoList();
+      // Match if the table is an index or ysql table.
+      return tableInfoList.stream().anyMatch(tableInfo ->
+              tableUuids.contains(
+                      getUUIDRepresentation(tableInfo.getId().toStringUtf8().replace("-", ""))) &&
+                      ((tableInfo.hasRelationType() && tableInfo.getRelationType() ==
+                              RelationType.INDEX_TABLE_RELATION) ||
+                      (tableInfo.hasTableType() && tableInfo.getTableType() ==
+                              TableType.PGSQL_TABLE_TYPE)));
+    } catch (Exception e) {
+      LOG.warn(e.toString());
+      return false;
+    } finally {
+      ybService.closeClient(client, masterAddresses);
     }
   }
 }

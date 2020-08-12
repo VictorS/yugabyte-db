@@ -15,6 +15,7 @@
 #include "yb/master/ts_descriptor.h"
 
 #include "yb/rpc/messenger.h"
+#include "yb/util/net/dns_resolver.h"
 
 namespace yb {
 namespace master {
@@ -44,18 +45,14 @@ const std::string kSystemLocalTruncatedAtColumn = "truncated_at";
 } // namespace
 
 LocalVTable::LocalVTable(const Master* const master)
-    : YQLVirtualTable(master::kSystemLocalTableName, master, CreateSchema()),
-      resolver_(new Resolver(master->messenger()->io_service())) {
+    : YQLVirtualTable(master::kSystemLocalTableName, master, CreateSchema()) {
 }
 
-Status LocalVTable::RetrieveData(const QLReadRequestPB& request,
-                                 std::unique_ptr<QLRowBlock>* vtable) const {
+Result<std::shared_ptr<QLRowBlock>> LocalVTable::RetrieveData(
+    const QLReadRequestPB& request) const {
   vector<std::shared_ptr<TSDescriptor> > descs;
   GetSortedLiveDescriptors(&descs);
-  vtable->reset(new QLRowBlock(schema_));
-
-  InetAddress remote_endpoint;
-  RETURN_NOT_OK(remote_endpoint.FromString(request.remote_endpoint().host()));
+  auto vtable = std::make_shared<QLRowBlock>(schema_);
 
   struct Entry {
     size_t index;
@@ -65,6 +62,8 @@ Status LocalVTable::RetrieveData(const QLReadRequestPB& request,
 
   std::vector<Entry> entries;
   entries.reserve(descs.size());
+
+  InetAddress remote_ip;
 
   size_t index = 0;
   for (const std::shared_ptr<TSDescriptor>& desc : descs) {
@@ -79,18 +78,25 @@ Status LocalVTable::RetrieveData(const QLReadRequestPB& request,
       if (desc->permanent_uuid() != request.proxy_uuid()) {
         continue;
       }
-    } else if (!util::RemoteEndpointMatchesTServer(ts_info, remote_endpoint)) {
-      continue;
+    } else {
+      if (index == 1) {
+        remote_ip = InetAddress(VERIFY_RESULT(master_->messenger()->resolver().Resolve(
+            request.remote_endpoint().host())));
+      }
+      if (!util::RemoteEndpointMatchesTServer(ts_info, remote_ip)) {
+        continue;
+      }
     }
 
     entries.push_back({index - 1, std::move(ts_info)});
-    entries.back().ips = util::GetPublicPrivateIPFutures(entries.back().ts_info, resolver_.get());
+    entries.back().ips = util::GetPublicPrivateIPFutures(
+        entries.back().ts_info, &master_->messenger()->resolver());
   }
 
   for (const auto& entry : entries) {
-    QLRow& row = (*vtable)->Extend();
-    auto private_ip = VERIFY_RESULT(entry.ips.private_ip_future.get());
-    auto public_ip = VERIFY_RESULT(entry.ips.public_ip_future.get());
+    QLRow& row = vtable->Extend();
+    InetAddress private_ip(VERIFY_RESULT(entry.ips.private_ip_future.get()));
+    InetAddress public_ip(VERIFY_RESULT(entry.ips.public_ip_future.get()));
     const CloudInfoPB& cloud_info = entry.ts_info.registration().common().cloud_info();
     RETURN_NOT_OK(SetColumnValue(kSystemLocalKeyColumn, "local", &row));
     RETURN_NOT_OK(SetColumnValue(kSystemLocalBootstrappedColumn, "COMPLETED", &row));
@@ -121,7 +127,7 @@ Status LocalVTable::RetrieveData(const QLReadRequestPB& request,
     break;
   }
 
-  return Status::OK();
+  return vtable;
 }
 
 Schema LocalVTable::CreateSchema() const {

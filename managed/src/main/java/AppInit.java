@@ -12,6 +12,7 @@ import com.google.inject.Inject;
 import com.google.inject.Singleton;
 import com.yugabyte.yw.cloud.AWSInitializer;
 import com.yugabyte.yw.common.ConfigHelper;
+import com.yugabyte.yw.common.CustomerTaskManager;
 import com.yugabyte.yw.common.ReleaseManager;
 import com.yugabyte.yw.models.Customer;
 import com.yugabyte.yw.models.InstanceType;
@@ -23,6 +24,8 @@ import play.Configuration;
 import play.Environment;
 import play.Logger;
 import play.libs.Yaml;
+
+import io.prometheus.client.hotspot.DefaultExports;
 
 import static com.yugabyte.yw.common.ConfigHelper.ConfigType.SoftwareVersion;
 import static com.yugabyte.yw.common.ConfigHelper.ConfigType.YugawareMetadata;
@@ -38,7 +41,7 @@ public class AppInit {
   @Inject
   public AppInit(Environment environment, Application application,
                  ConfigHelper configHelper, ReleaseManager releaseManager,
-                 AWSInitializer awsInitializer) {
+                 AWSInitializer awsInitializer, CustomerTaskManager taskManager) {
     Logger.info("Yugaware Application has started");
     Configuration appConfig = application.configuration();
     String mode = appConfig.getString("yb.mode", "PLATFORM");
@@ -109,6 +112,14 @@ public class AppInit {
 
       // Import new local releases into release metadata
       releaseManager.importLocalReleases();
-    }
+
+      // initialize prometheus exports
+      DefaultExports.initialize();
+
+      // Fail incomplete tasks
+      taskManager.failAllPendingTasks();
+
+      Logger.info("AppInit completed");
+   }
   }
 }

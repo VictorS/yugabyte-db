@@ -8,18 +8,18 @@ import PropTypes from 'prop-types';
 import { FormattedDate, FormattedRelative } from 'react-intl';
 import { ClusterInfoPanelContainer, YBWidget } from '../../panels';
 import { OverviewMetricsContainer, StandaloneMetricsPanelContainer, DiskUsagePanel, CpuUsagePanel } from '../../metrics';
-import { YBResourceCount, YBCost, DescriptionList, YBCodeBlock } from 'components/common/descriptors';
+import { YBResourceCount, YBCost, DescriptionList, YBCodeBlock } from '../../../components/common/descriptors';
 import { RegionMap, YBMapLegend} from '../../maps';
 import { isNonEmptyObject, isNullOrEmpty,
-  isNonEmptyArray, isNonEmptyString } from 'utils/ObjectUtils';
+  isNonEmptyArray, isNonEmptyString } from '../../../utils/ObjectUtils';
 import { isKubernetesUniverse, getPrimaryCluster } from '../../../utils/UniverseUtils';
 import { FlexContainer, FlexGrow, FlexShrink } from '../../common/flexbox/YBFlexBox';
 import { isDefinedNotNull } from '../../../utils/ObjectUtils';
-import { getPromiseState } from 'utils/PromiseUtils';
+import { getPromiseState } from '../../../utils/PromiseUtils';
 import { YBButton, YBModal } from '../../common/forms/fields';
 import moment from 'moment';
 import pluralize from 'pluralize';
-import { isEnabled, isDisabled } from 'utils/LayoutUtils';
+import { isEnabled, isDisabled } from '../../../utils/LayoutUtils';
 
 class DatabasePanel extends PureComponent {
   static propTypes = {
@@ -181,9 +181,19 @@ class HealthInfoPanel extends PureComponent {
 
   render() {
     const { healthCheck, universeInfo } = this.props;
+    let disabledUntilStr = '';
     if (getPromiseState(healthCheck).isSuccess()) {
       const healthCheckData = JSON.parse([...healthCheck.data].reverse()[0]);
       const lastUpdateDate = moment(healthCheckData.timestamp);
+      if (universeInfo.universeConfig && 'disableAlertsUntilSecs' in universeInfo.universeConfig) {
+        const disabledUntilSecs = Number(universeInfo.universeConfig.disableAlertsUntilSecs);
+        const now = Date.now() / 1000;
+        if (!Number.isSafeInteger(disabledUntilSecs)) {
+          disabledUntilStr = " Alerts are snoozed";
+        } else if (disabledUntilSecs > now) {
+          disabledUntilStr = " Alerts are snoozed until " + moment.unix(disabledUntilSecs).format("MMM DD hh:mm a");
+        }
+      }
       const totalNodesCounter = healthCheckData.data.length;
       let errorNodesCounter = 0;
 
@@ -217,6 +227,10 @@ class HealthInfoPanel extends PureComponent {
           ? <span className="text-lightgray text-light"><i className={"fa fa-clock-o"}></i> Updated <span className={"text-dark text-normal"}><FormattedRelative
           value={lastUpdateDate} /></span></span>
           : null
+        },
+        {name: "", data: disabledUntilStr
+        ? <span className="text-light"><i className={"fa fa-exclamation-triangle"}>{disabledUntilStr}</i></span>
+        : null
         },
       ];
 
@@ -342,7 +356,7 @@ export default class UniverseOverviewNew extends Component {
         body={
           <FlexContainer direction={"column"} >
             <FlexGrow>
-              <div style={{marginBottom: '30px'}}>Load a retail data set and run queries against it.</div>
+              <div style={{marginBottom: '30px'}}>Load a data set and run queries against it.</div>
             </FlexGrow>
             <FlexShrink className={"centered"}>
               <Fragment>
@@ -358,15 +372,11 @@ export default class UniverseOverviewNew extends Component {
                   cancelLabel={"Close"}
                   showCancelButton={true}
                 >
-                  <div>1. Create a sample retail database:</div>
+                  <div>Query a sample database:</div>
                   <YBCodeBlock>
-                    yugabyte-db demo create retail
+                    yugabyted demo connect
                   </YBCodeBlock>
-                  <div>2. Connect to the database:</div>
-                  <YBCodeBlock>
-                    yugabyte-db demo run retail
-                  </YBCodeBlock>
-                  <div>3. Explore more YSQL <a href="https://docs.yugabyte.com/latest/quick-start/explore-ysql/">here</a>.</div>
+                  <div>Explore YSQL at <a href="https://docs.yugabyte.com/latest/quick-start/explore-ysql/">here</a>.</div>
                 </YBModal>
               </Fragment>
             </FlexShrink>
@@ -412,10 +422,7 @@ export default class UniverseOverviewNew extends Component {
         }
         headerRight={
           isNonEmptyObject(universeInfo)
-          ? <Link onClick={(e) => {
-            e.preventDefault();
-            window.location.pathname = `/universes/${universeInfo.universeUUID}/tables`;
-          }}>Details</Link>
+          ? <Link to={`/universes/${universeInfo.universeUUID}/tables`}>Details</Link>
           : null
         }
         body={
@@ -448,10 +455,19 @@ export default class UniverseOverviewNew extends Component {
 
   getDiskUsageWidget = (universeInfo) => {
     // For kubernetes the disk usage would be in container tab, rest it would be server tab.
-    const subTab = isKubernetesUniverse(universeInfo) ? "container" : "server";
-    const metricKey = isKubernetesUniverse(universeInfo) ? "container_memory_usage" : "disk_usage";
+    const isKubernetes = isKubernetesUniverse(universeInfo);
+    const subTab = isKubernetes ? "container" : "server";
+    const metricKey = isKubernetes ? "container_volume_stats" : "disk_usage";
+    const secondaryMetric = isKubernetes ? [{
+      metric: "container_volume_max_usage",
+      name: "size",
+    }] : null;
     return (
-      <StandaloneMetricsPanelContainer metricKey={metricKey} type="overview">
+      <StandaloneMetricsPanelContainer
+        metricKey={metricKey}
+        additionalMetricKeys={secondaryMetric}
+        type="overview"
+      >
         { props => {
           return (<YBWidget
             noMargin
@@ -465,7 +481,6 @@ export default class UniverseOverviewNew extends Component {
               <DiskUsagePanel
                 metric={props.metric}
                 className={"disk-usage-container"}
-                isKubernetes={isKubernetesUniverse(universeInfo)}
               />
             }
           />);
@@ -491,7 +506,7 @@ export default class UniverseOverviewNew extends Component {
                         </Link>}
             body={
               <CpuUsagePanel
-                 metric={props.metric}
+                metric={props.metric}
                 className={"disk-usage-container"}
                 isKubernetes={isItKubernetesUniverse}
               />
@@ -546,13 +561,16 @@ export default class UniverseOverviewNew extends Component {
 
   getDatabaseWidget = (universeInfo, tasks) => {
     const lastUpdateDate = this.getLastUpdateDate();
-    const { updateAvailable } = this.props;
+    const { updateAvailable, currentCustomer } = this.props;
+    const showUpdate = updateAvailable &&
+                       isEnabled(currentCustomer.data.features, "universes.actions");
+
     const infoWidget = (<YBWidget
         headerLeft={
           "Info"
         }
         headerRight={
-          updateAvailable ? (
+          showUpdate ? (
             <a onClick={this.props.showSoftwareUpgradesModal}>Upgrade <span className="badge badge-pill badge-orange">{updateAvailable}</span></a>
            ) : null
         }
@@ -590,6 +608,7 @@ export default class UniverseOverviewNew extends Component {
 
     const universeInfo = currentUniverse.data;
     const nodePrefixes = [universeInfo.universeDetails.nodePrefix];
+    const isItKubernetesUniverse = isKubernetesUniverse(universeInfo);
     return (
       <Fragment>
         <Row>
@@ -604,8 +623,14 @@ export default class UniverseOverviewNew extends Component {
           {this.getRegionMapWidget(universeInfo)}
 
           <Col lg={4} xs={12} md={6} sm={6}>
-            <OverviewMetricsContainer universeUuid={universeInfo.universeUUID} type={"overview"} origin={"universe"}
-              width={width} nodePrefixes={nodePrefixes} />
+            <OverviewMetricsContainer
+              universeUuid={universeInfo.universeUUID}
+              type={"overview"}
+              origin={"universe"}
+              width={width}
+              nodePrefixes={nodePrefixes}
+              isKubernetesUniverse={isItKubernetesUniverse}
+            />
           </Col>
           <Col lg={4} md={6} sm={6} xs={12}>
             {this.getDiskUsageWidget(universeInfo)}

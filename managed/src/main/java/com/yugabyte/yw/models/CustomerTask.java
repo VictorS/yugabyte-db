@@ -2,9 +2,12 @@
 
 package com.yugabyte.yw.models;
 
+import java.lang.reflect.Field;
+import java.util.Arrays;
 import java.util.Date;
 import java.util.List;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 import javax.persistence.Column;
 import javax.persistence.Entity;
@@ -38,7 +41,10 @@ public class CustomerTask extends Model {
     Node,
 
     @EnumValue("Backup")
-    Backup
+    Backup,
+
+    @EnumValue("KMS Configuration")
+    KMSConfiguration;
   }
 
   public enum TaskType {
@@ -69,14 +75,33 @@ public class CustomerTask extends Model {
     @EnumValue("UpgradeSoftware")
     UpgradeSoftware,
 
+    @EnumValue("UpdateDiskSize")
+    UpdateDiskSize,
+
     @EnumValue("UpgradeGflags")
     UpgradeGflags,
 
     @EnumValue("BulkImportData")
     BulkImportData,
 
+    @EnumValue("Backup")
+    Backup,
+
     @EnumValue("Restore")
-    Restore;
+    Restore,
+
+    @Deprecated
+    @EnumValue("SetEncryptionKey")
+    SetEncryptionKey,
+
+    @EnumValue("EnableEncryptionAtRest")
+    EnableEncryptionAtRest,
+
+    @EnumValue("RotateEncryptionKey")
+    RotateEncryptionKey,
+
+    @EnumValue("DisableEncryptionAtRest")
+    DisableEncryptionAtRest;
 
     public String toString(boolean completed) {
       switch(this) {
@@ -94,9 +119,31 @@ public class CustomerTask extends Model {
           return completed ? "Bulk imported data" : "Bulk importing data";
         case Restore:
           return completed ? "Restored " : "Restoring ";
+        case Backup:
+          return completed ? "Backed up" : "Backing up";
+        case SetEncryptionKey:
+          return completed ? "Set encryption key" : "Setting encryption key";
+        case EnableEncryptionAtRest:
+          return completed ? "Enabled encryption at rest" : "Enabling encryption at rest";
+        case RotateEncryptionKey:
+          return completed ? "Rotated encryption at rest universe key" :
+                  "Rotating encryption at rest universe key";
+        case DisableEncryptionAtRest:
+          return completed ? "Disabled encryption at rest" : "Disabling encryption at rest";
         default:
           return null;
       }
+    }
+
+    public static List<TaskType> filteredValues() {
+      return Arrays.stream(TaskType.values()).filter(value -> {
+        try {
+          Field field = TaskType.class.getField(value.name());
+          return !field.isAnnotationPresent(Deprecated.class);
+        } catch (Exception e) {
+          return false;
+        }
+      }).collect(Collectors.toList());
     }
   }
 
@@ -167,6 +214,11 @@ public class CustomerTask extends Model {
     th.createTime = new Date();
     th.save();
     return th;
+  }
+
+  public static CustomerTask get(Long id) {
+    return CustomerTask.find.where()
+      .idEq(id).findUnique();
   }
 
   public String getFriendlyDescription() {

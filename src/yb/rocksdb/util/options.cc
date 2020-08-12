@@ -92,7 +92,8 @@ ImmutableCFOptions::ImmutableCFOptions(const Options& options)
       listeners(options.listeners),
       row_cache(options.row_cache),
       mem_tracker(options.mem_tracker),
-      block_based_table_mem_tracker(options.block_based_table_mem_tracker) {}
+      block_based_table_mem_tracker(options.block_based_table_mem_tracker),
+      iterator_replacer(options.iterator_replacer) {}
 
 ColumnFamilyOptions::ColumnFamilyOptions()
     : comparator(BytewiseComparator()),
@@ -260,7 +261,7 @@ DBOptions::DBOptions()
       table_cache_numshardbits(4),
       WAL_ttl_seconds(0),
       WAL_size_limit_MB(0),
-      manifest_preallocation_size(4 * 1024 * 1024),
+      manifest_preallocation_size(64 * 1024),
       allow_os_buffer(true),
       allow_mmap_reads(false),
       allow_mmap_writes(false),
@@ -400,8 +401,6 @@ void DBOptions::Dump(Logger* log) const {
       enable_thread_tracking);
   RHEADER(log, "         Options.allow_concurrent_memtable_write: %d",
       allow_concurrent_memtable_write);
-  RHEADER(log, "         Options.in_memory_erase: %d",
-      in_memory_erase);
   RHEADER(log, "      Options.enable_write_thread_adaptive_yield: %d",
       enable_write_thread_adaptive_yield);
   RHEADER(log, "             Options.write_thread_max_yield_usec: %" PRIu64,

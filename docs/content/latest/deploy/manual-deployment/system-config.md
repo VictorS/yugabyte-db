@@ -1,7 +1,8 @@
 ---
 title: System configuration
+headerTitle: System configuration
 linkTitle: 1. System configuration
-description: System configuration
+description: Configure NTP and ulimits on your YugabyteDB cluster
 aliases:
   - /deploy/manual-deployment/system-config
 menu:
@@ -28,7 +29,7 @@ Here's the command to install these packages.
 $ sudo yum install -y epel-release ntp
 ```
 
-## Setting ulimits
+## ulimits
 
 In Linux, `ulimit` is used to limit and control the usage of system resources (threads, files, and network connections) on a per-process or per-user basis.
 
@@ -81,7 +82,7 @@ $ ulimit -n <value>
 
 {{< note title="Note" >}}
 
-- After changing a ulimit setting, the YB-Master and YB-TServer services must be restarted in order for the new settings to take effect. Check the `/proc/<process pid>` file to see the current settings.
+- After changing a ulimit setting, the YB-Master and YB-TServer servers must be restarted in order for the new settings to take effect. Check the `/proc/<process pid>` file to see the current settings.
 - Changes made using ulimit may revert following a system restart depending on the system configuration.
 
 {{< /note >}}
@@ -115,4 +116,11 @@ After changing a `ulimit` setting in `/etc/security/limits.conf`, you will need 
 
 {{< /note >}}
 
+{{< note title="Note" >}}
+If you're using a desktop-distribution, such as ubuntu-desktop, the settings above may not suffice.
+The OS needs additional steps to change `ulimit` for gui login. In the case of ubuntu-desktop:
 
+In `/etc/systemd/user.conf` and `/etc/systemd/system.conf`, add at the end of file `DefaultLimitNOFILE=64000`.
+
+Something similar may be needed for other distributions.
+{{< /note >}}

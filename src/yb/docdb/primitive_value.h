@@ -40,7 +40,7 @@ namespace docdb {
 // Used for extending a list.
 // PREPEND prepends the arguments one by one (PREPEND a b c) will prepend [c b a] to the list,
 // while PREPEND_BLOCK prepends the arguments together, so it will prepend [a b c] to the list.
-  YB_DEFINE_ENUM(ListExtendOrder, (APPEND)(PREPEND_BLOCK)(PREPEND))
+YB_DEFINE_ENUM(ListExtendOrder, (APPEND)(PREPEND_BLOCK)(PREPEND))
 
 // A necessary use of a forward declaration to avoid circular inclusion.
 class SubDocument;
@@ -87,7 +87,7 @@ class PrimitiveValue {
       type_ = other.type_;
       frozen_val_ = new FrozenContainer(*(other.frozen_val_));
     } else {
-      memmove(this, &other, sizeof(PrimitiveValue));
+      memmove(static_cast<void*>(this), &other, sizeof(PrimitiveValue));
     }
     ttl_seconds_ = other.ttl_seconds_;
     write_time_ = other.write_time_;
@@ -107,6 +107,15 @@ class PrimitiveValue {
     this->~PrimitiveValue();
     MoveFrom(&other);
     return *this;
+  }
+
+  explicit PrimitiveValue(const Slice& s, SortOrder sort_order = SortOrder::kAscending) {
+    if (sort_order == SortOrder::kDescending) {
+      type_ = ValueType::kStringDescending;
+    } else {
+      type_ = ValueType::kString;
+    }
+    new(&str_val_) std::string(s.cdata(), s.cend());
   }
 
   explicit PrimitiveValue(const std::string& s, SortOrder sort_order = SortOrder::kAscending) {
@@ -181,6 +190,8 @@ class PrimitiveValue {
     column_id_val_ = column_id;
   }
 
+  static PrimitiveValue NullValue(ColumnSchema::SortingType sorting);
+
   // Converts a ColumnSchema::SortingType to its SortOrder equivalent.
   // ColumnSchema::SortingType::kAscending and ColumnSchema::SortingType::kNotSpecified get
   // converted to SortOrder::kAscending.
@@ -246,6 +257,7 @@ class PrimitiveValue {
   static PrimitiveValue UInt64(uint64_t v, SortOrder sort_order = SortOrder::kAscending);
   static PrimitiveValue TransactionId(Uuid transaction_id);
   static PrimitiveValue TableId(Uuid table_id);
+  static PrimitiveValue PgTableOid(const PgTableOid pgtable_id);
   static PrimitiveValue Jsonb(const std::string& json);
 
   KeyBytes ToKeyBytes() const;
@@ -499,12 +511,12 @@ class PrimitiveValue {
     } else {
       // Non-string primitive values only have plain old data. We are assuming there is no overlap
       // between the two objects, so we're using memcpy instead of memmove.
-      memcpy(this, other, sizeof(PrimitiveValue));
+      memcpy(static_cast<void*>(this), other, sizeof(PrimitiveValue));
 #ifndef NDEBUG
       // We could just leave the old object as is for it to be in a "valid but unspecified" state.
       // However, in debug mode we clear the old object's state to make sure we don't attempt to use
       // it.
-      memset(other, 0xab, sizeof(PrimitiveValue));
+      memset(static_cast<void*>(other), 0xab, sizeof(PrimitiveValue));
       // Restore the type. There should be no deallocation for non-string types anyway.
       other->type_ = ValueType::kNullLow;
 #endif

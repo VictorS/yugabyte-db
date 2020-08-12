@@ -1,7 +1,8 @@
 ---
-title: CREATE GROUP
-description: Groups and roles
-summary: Groups and roles
+title: CREATE GROUP statement [YSQL]
+headerTitle: CREATE GROUP
+linkTitle: CREATE GROUP
+description: Use the CREATE GROUP statement to create a group role. CREATE GROUP is an alias for CREATE ROLE and is used to create a group role.
 menu:
   latest:
     identifier: api-ysql-commands-create-group
@@ -14,7 +15,7 @@ showAsideToc: true
 
 ## Synopsis
 
-`CREATE GROUP` is an alias for [`CREATE ROLE`](../dcl_create_role) and is used to create a group role.
+Use the `CREATE GROUP` statement to create a group role. `CREATE GROUP` is an alias for [`CREATE ROLE`](../dcl_create_role) and is used to create a group role.
 
 ## Syntax
 
@@ -55,7 +56,6 @@ yugabyte=# CREATE GROUP SysAdmin WITH CREATEDB CREATEROLE;
 
 ## See also
 
-[`CREATE ROLE`](../dcl_create_role)
-[`GRANT`](../dcl_grant)
-[`REVOKE`](../dcl_revoke)
-[Other YSQL Statements](..)
+- [`CREATE ROLE`](../dcl_create_role)
+- [`GRANT`](../dcl_grant)
+- [`REVOKE`](../dcl_revoke)

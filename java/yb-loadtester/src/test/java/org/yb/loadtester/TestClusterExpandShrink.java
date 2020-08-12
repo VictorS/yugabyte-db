@@ -15,7 +15,7 @@ package org.yb.loadtester;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.yb.YBTestRunner;
+import org.yb.util.YBTestRunnerNonTsanOnly;
 
 import java.util.Arrays;
 
@@ -24,7 +24,7 @@ import java.util.Arrays;
  * without any significant impact to a running load test.
  */
 
-@RunWith(value=YBTestRunner.class)
+@RunWith(value=YBTestRunnerNonTsanOnly.class)
 public class TestClusterExpandShrink extends TestClusterBase {
   @Test(timeout = TEST_TIMEOUT_SEC * 1000) // 20 minutes.
   public void testClusterExpandAndShrink() throws Exception {
@@ -33,6 +33,17 @@ public class TestClusterExpandShrink extends TestClusterBase {
 
     // Now perform a tserver expand and shrink.
     performTServerExpandShrink(/* fullMove */ false);
+
+    verifyClusterHealth();
+  }
+
+  @Test(timeout = TEST_TIMEOUT_SEC * 1000) // 20 minutes.
+  public void testClusterExpandAndShrinkWithKillMasterLeader() throws Exception {
+    // Wait for load tester to generate traffic.
+    loadTesterRunnable.waitNumOpsIncrement(NUM_OPS_INCREMENT);
+
+    // Now perform a tserver expand and shrink.
+    performTServerExpandShrink(/* fullMove */ false, /* killMasterLeader */ true);
 
     verifyClusterHealth();
   }

@@ -4,10 +4,10 @@ import React, { Component } from 'react';
 import { Row, Col } from 'react-bootstrap';
 import { Field, FieldArray } from 'redux-form';
 import { YBInputField, YBButton, YBSelect } from '../../../common/forms/fields';
-import { isDefinedNotNull } from 'utils/ObjectUtils';
+import { isDefinedNotNull } from '../../../../utils/ObjectUtils';
 
 class OnPremListRegionsAndZones extends Component {
-  componentWillMount() {
+  UNSAFE_componentWillMount() {
     const {fields} = this.props;
     if (fields.length === 0) {
       this.props.fields.push({});
@@ -93,6 +93,11 @@ class OnPremListRegionsAndZones extends Component {
 }
 
 export default class OnPremRegionsAndZones extends Component {
+
+  componentDidMount() {
+    document.getElementById('onprem-region-form').scrollIntoView(false);
+  }
+
   createOnPremRegionsAndZones = vals => {
     this.props.setOnPremRegionsAndZones(vals);
   };
@@ -100,7 +105,7 @@ export default class OnPremRegionsAndZones extends Component {
   render() {
     const {handleSubmit, switchToJsonEntry, isEditProvider} = this.props;
     return (
-      <div className="on-prem-provider-form-container">
+      <div id="onprem-region-form" className="on-prem-provider-form-container">
         <form name="onPremConfigForm" onSubmit={handleSubmit(this.createOnPremRegionsAndZones)}>
           <div className="on-prem-form-text">
             Add one or more regions, each with one or more availability zones.

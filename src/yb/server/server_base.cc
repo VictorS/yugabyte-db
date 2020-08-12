@@ -73,6 +73,7 @@
 #include "yb/util/spinlock_profiling.h"
 #include "yb/util/thread.h"
 #include "yb/util/version_info.h"
+#include "yb/util/encryption_util.h"
 #include "yb/gutil/sysinfo.h"
 
 DEFINE_int32(num_reactor_threads, -1,
@@ -95,6 +96,8 @@ DEFINE_string(yb_test_name, "",
 DEFINE_bool(TEST_check_broadcast_address, true, "Break connectivity in test mini cluster to "
             "check broadcast address.");
 
+DEFINE_test_flag(string, public_hostname_suffix, ".ip.yugabyte", "Suffix for public hostnames.");
+
 using namespace std::literals;
 using namespace std::placeholders;
 
@@ -107,8 +110,6 @@ using strings::Substitute;
 namespace yb {
 namespace server {
 
-static const string kWildCardHostAddress = "0.0.0.0";
-
 namespace {
 
 // Disambiguates between servers when in a minicluster.
@@ -116,7 +117,19 @@ AtomicInt<int32_t> mem_tracker_id_counter(-1);
 
 std::string kServerMemTrackerName = "server";
 
-std::vector<MemTrackerPtr> common_mem_trackers;
+struct CommonMemTrackers {
+  std::vector<MemTrackerPtr> trackers;
+
+  ~CommonMemTrackers() {
+#if defined(TCMALLOC_ENABLED)
+    // Prevent root mem tracker from accessing common mem trackers.
+    auto root = MemTracker::GetRootTracker();
+    root->SetPollChildrenConsumptionFunctors(nullptr);
+#endif
+  }
+};
+
+std::unique_ptr<CommonMemTrackers> common_mem_trackers;
 
 } // anonymous namespace
 
@@ -131,7 +144,7 @@ std::shared_ptr<MemTracker> CreateMemTrackerForServer() {
 
 #if defined(TCMALLOC_ENABLED)
 void RegisterTCMallocTracker(const char* name, const char* prop) {
-  common_mem_trackers.push_back(MemTracker::CreateTracker(
+  common_mem_trackers->trackers.push_back(MemTracker::CreateTracker(
       -1, "TCMalloc "s + name, std::bind(&MemTracker::GetTCMallocProperty, prop)));
 }
 #endif
@@ -154,10 +167,19 @@ RpcServerBase::RpcServerBase(string name, const ServerBaseOptions& options,
   // When mem tracker for first server is created we register mem trackers that report tc malloc
   // status.
   if (mem_tracker_->id() == kServerMemTrackerName) {
+    common_mem_trackers = std::make_unique<CommonMemTrackers>();
+
     RegisterTCMallocTracker("Thread Cache", "tcmalloc.thread_cache_free_bytes");
     RegisterTCMallocTracker("Central Cache", "tcmalloc.central_cache_free_bytes");
     RegisterTCMallocTracker("Transfer Cache", "tcmalloc.transfer_cache_free_bytes");
     RegisterTCMallocTracker("PageHeap Free", "tcmalloc.pageheap_free_bytes");
+
+    auto root = MemTracker::GetRootTracker();
+    root->SetPollChildrenConsumptionFunctors([]() {
+          for (auto& tracker : common_mem_trackers->trackers) {
+            tracker->UpdateConsumption();
+          }
+        });
   }
 #endif
 
@@ -239,7 +261,7 @@ Status RpcServerBase::Init() {
 
   InitSpinLockContentionProfiling();
 
-  SetStackTraceSignal(SIGUSR2);
+  RETURN_NOT_OK(SetStackTraceSignal(SIGUSR2));
 
   // Initialize the clock immediately. This checks that the clock is synchronized
   // so we're less likely to get into a partially initialized state on disk during startup
@@ -433,6 +455,8 @@ void RpcAndWebServerBase::GenerateInstanceID() {
 }
 
 Status RpcAndWebServerBase::Init() {
+  yb::enterprise::InitOpenSSL();
+
   Status s = fs_manager_->Open();
   if (s.IsNotFound() || (!s.ok() && fs_manager_->HasAnyLockFiles())) {
     LOG(INFO) << "Could not load existing FS layout: " << s.ToString();
@@ -466,27 +490,45 @@ void RpcAndWebServerBase::GetStatusPB(ServerStatusPB* status) const {
 
 Status RpcAndWebServerBase::GetRegistration(ServerRegistrationPB* reg, RpcOnly rpc_only) const {
   std::vector<HostPort> addrs = CHECK_NOTNULL(rpc_server())->GetRpcHostPort();
+  DCHECK_GE(addrs.size(), 1);
 
   // Fall back to hostname resolution if the rpc hostname is a wildcard.
-  if (addrs.size() > 1 || addrs[0].host() == kWildCardHostAddress || addrs[0].port() == 0) {
-    auto addrs = CHECK_NOTNULL(rpc_server())->GetBoundAddresses();
-    RETURN_NOT_OK_PREPEND(AddHostPortPBs(addrs, reg->mutable_private_rpc_addresses()),
-                          "Failed to add RPC endpoints to registration");
+  if (addrs.size() != 1 || IsWildcardAddress(addrs[0].host()) || addrs[0].port() == 0) {
+    vector<Endpoint> endpoints =
+        CHECK_NOTNULL(rpc_server())->GetBoundAddresses();
+    RETURN_NOT_OK_PREPEND(
+        AddHostPortPBs(endpoints, reg->mutable_private_rpc_addresses()),
+        "Failed to add RPC endpoints to registration");
+    for (const auto &addr : reg->private_rpc_addresses()) {
+      LOG(INFO) << " Using private rpc addresses: ( " << addr.ShortDebugString()
+                << " )";
+    }
   } else {
     HostPortsToPBs(addrs, reg->mutable_private_rpc_addresses());
-    LOG(INFO) << "Using private ip address " << reg->private_rpc_addresses(0).host();
+    LOG(INFO) << "Using private rpc address "
+              << reg->private_rpc_addresses(0).host();
   }
 
   HostPortsToPBs(options_.broadcast_addresses, reg->mutable_broadcast_addresses());
 
   if (!rpc_only) {
-    std::vector<Endpoint> web_addrs;
-    RETURN_NOT_OK_PREPEND(
-        CHECK_NOTNULL(web_server())->GetBoundAddresses(&web_addrs),
-        "Unable to get bound HTTP addresses");
-    RETURN_NOT_OK_PREPEND(AddHostPortPBs(
-        web_addrs, reg->mutable_http_addresses()),
-        "Failed to add HTTP addresses to registration");
+    HostPort web_input_hp;
+    RETURN_NOT_OK(CHECK_NOTNULL(web_server())->GetInputHostPort(&web_input_hp));
+    if (IsWildcardAddress(web_input_hp.host()) || web_input_hp.port() == 0) {
+      std::vector<Endpoint> web_addrs;
+      RETURN_NOT_OK_PREPEND(
+          CHECK_NOTNULL(web_server())->GetBoundAddresses(&web_addrs),
+          "Unable to get bound HTTP addresses");
+      RETURN_NOT_OK_PREPEND(AddHostPortPBs(
+          web_addrs, reg->mutable_http_addresses()),
+          "Failed to add HTTP addresses to registration");
+      for (const auto &addr : reg->http_addresses()) {
+        LOG(INFO) << "Using http addresses: ( " << addr.ShortDebugString() << " )";
+      }
+    } else {
+      HostPortsToPBs({ web_input_hp }, reg->mutable_http_addresses());
+      LOG(INFO) << "Using http address " << reg->http_addresses(0).host();
+    }
   }
   reg->mutable_cloud_info()->set_placement_cloud(options_.placement_cloud());
   reg->mutable_cloud_info()->set_placement_region(options_.placement_region());
@@ -496,7 +538,7 @@ Status RpcAndWebServerBase::GetRegistration(ServerRegistrationPB* reg, RpcOnly r
 }
 
 string RpcAndWebServerBase::GetEasterEggMessage() const {
-  return "Congratulations on installing YugaByte DB. "
+  return "Congratulations on installing YugabyteDB. "
          "We'd like to welcome you to the community with a free t-shirt and pack of stickers! "
          "Please claim your reward here: <a href='https://www.yugabyte.com/community-rewards/'>"
          "https://www.yugabyte.com/community-rewards/</a>";
@@ -540,14 +582,15 @@ void RpcAndWebServerBase::DisplayGeneralInfoIcons(std::stringstream* output) {
   DisplayIconTile(output, "fa-list-ul", "Threads", "/threadz");
 }
 
-
-void RpcAndWebServerBase::DisplayRpcIcons(std::stringstream* output) {
+Status RpcAndWebServerBase::DisplayRpcIcons(std::stringstream* output) {
   // RPCs in Progress.
   DisplayIconTile(output, "fa-tasks", "Server RPCs", "/rpcz");
+  return Status::OK();
 }
 
 Status RpcAndWebServerBase::HandleDebugPage(const Webserver::WebRequest& req,
-                                            stringstream* output) {
+                                            Webserver::WebResponse* resp) {
+  std::stringstream *output = &resp->output;
   *output << "<h1>Debug Utilities</h1>\n";
 
   *output << "<div class='row debug-tiles'>\n";
@@ -556,7 +599,7 @@ Status RpcAndWebServerBase::HandleDebugPage(const Webserver::WebRequest& req,
   *output << "</div> <!-- row -->\n";
   *output << "<h2> RPCs In Progress </h2>";
   *output << "<div class='row debug-tiles'>\n";
-  DisplayRpcIcons(output);
+  RETURN_NOT_OK(DisplayRpcIcons(output));
   *output << "</div> <!-- row -->\n";
   return Status::OK();
 }
@@ -585,11 +628,12 @@ void RpcAndWebServerBase::Shutdown() {
 }
 
 std::string TEST_RpcAddress(int index, Private priv) {
-  return Format("127.0.0.$0$1", index * 2 + (priv ? 0 : 1), priv ? "" : ".ip.yugabyte");
+  return Format("127.0.0.$0$1",
+                index * 2 + (priv ? 0 : 1), priv ? "" : FLAGS_TEST_public_hostname_suffix);
 }
 
 string TEST_RpcBindEndpoint(int index, uint16_t port) {
-  return Format("$0:$1", TEST_RpcAddress(index, Private::kTrue), port);
+  return HostPortToString(TEST_RpcAddress(index, Private::kTrue), port);
 }
 
 constexpr int kMaxServers = 20;

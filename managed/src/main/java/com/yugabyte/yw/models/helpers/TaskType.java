@@ -1,5 +1,10 @@
 package com.yugabyte.yw.models.helpers;
 
+import java.lang.reflect.Field;
+import java.util.Arrays;
+import java.util.List;
+import java.util.stream.Collectors;
+
 
 /**
  * These are the various types of user tasks and internal tasks.
@@ -29,10 +34,13 @@ public enum TaskType {
 
   BackupUniverse("BackupUniverse"),
 
+  MultiTableBackup("MultiTableBackup"),
+
   EditUniverse("EditUniverse"),
 
   EditKubernetesUniverse("EditKubernetesUniverse"),
 
+  @Deprecated
   KubernetesProvision("KubernetesProvision"),
 
   ImportIntoTable("ImportIntoTable"),
@@ -52,6 +60,17 @@ public enum TaskType {
   RemoveNodeFromUniverse("RemoveNodeFromUniverse"),
 
   ReleaseInstanceFromUniverse("ReleaseInstanceFromUniverse"),
+
+  SetUniverseKey("SetUniverseKey"),
+
+  @Deprecated
+  SetKubernetesUniverseKey("SetKubernetesUniverseKey"),
+
+  CreateKMSConfig("CreateKMSConfig"),
+
+  DeleteKMSConfig("DeleteKMSConfig"),
+
+  UpdateDiskSize("UpdateDiskSize"),
 
   // Tasks belonging to subtasks classpath
   AnsibleClusterServerCtl("subtasks.AnsibleClusterServerCtl"),
@@ -83,6 +102,8 @@ public enum TaskType {
   ManipulateDnsRecordTask("subtasks.ManipulateDnsRecordTask"),
 
   RemoveUniverseEntry("subtasks.RemoveUniverseEntry"),
+
+  SetFlagInMemory("subtasks.SetFlagInMemory"),
 
   SetNodeState("subtasks.SetNodeState"),
 
@@ -134,9 +155,20 @@ public enum TaskType {
 
   EnableEncryptionAtRest("subtasks.EnableEncryptionAtRest"),
 
+  DisableEncryptionAtRest("subtasks.DisableEncryptionAtRest"),
+
+  DestroyEncryptionAtRest("subtasks.DestroyEncryptionAtRest"),
+
   KubernetesCommandExecutor("subtasks.KubernetesCommandExecutor"),
 
-  KubernetesWaitForPod("subtasks.KubernetesWaitForPod");
+  KubernetesWaitForPod("subtasks.KubernetesWaitForPod"),
+
+  KubernetesCheckNumPod("subtasks.KubernetesCheckNumPod"),
+
+  @Deprecated
+  CopyEncryptionKeyFile("subtasks.CopyEncryptionKeyFile"),
+
+  WaitForEncryptionKeyInMemory("subtasks.WaitForEncryptionKeyInMemory");
 
   private String relativeClassPath;
 
@@ -147,5 +179,16 @@ public enum TaskType {
   @Override
   public String toString() {
     return this.relativeClassPath;
+  }
+
+  public static List<TaskType> filteredValues() {
+    return Arrays.stream(TaskType.values()).filter(value -> {
+      try {
+        Field field = TaskType.class.getField(value.name());
+        return !field.isAnnotationPresent(Deprecated.class);
+      } catch (Exception e) {
+        return false;
+      }
+    }).collect(Collectors.toList());
   }
 }

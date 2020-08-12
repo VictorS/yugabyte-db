@@ -73,7 +73,7 @@ struct TestLogSequenceElem {
     ROLL
   };
   ElemType type;
-  OpId id;
+  OpIdPB id;
 };
 
 class LogTest : public LogTestBase {
@@ -88,8 +88,8 @@ class LogTest : public LogTestBase {
   // Create a series of NO_OP entries in the log.
   // Anchor each segment on the first OpId of each log segment,
   // and update op_id to point to the next valid OpId.
-  Status AppendMultiSegmentSequence(int num_total_segments, int num_ops_per_segment,
-                                    OpId* op_id, vector<LogAnchor*>* anchors) {
+  Status AppendMultiSegmentSequence(
+      int num_total_segments, int num_ops_per_segment, OpIdPB* op_id, vector<LogAnchor*>* anchors) {
     CHECK(op_id->IsInitialized());
     for (int i = 0; i < num_total_segments - 1; i++) {
       if (anchors) {
@@ -158,7 +158,7 @@ class LogTest : public LogTestBase {
 TEST_F(LogTest, TestMultipleEntriesInABatch) {
   BuildLog();
 
-  OpId opid;
+  OpIdPB opid;
   opid.set_term(1);
   opid.set_index(1);
 
@@ -179,12 +179,12 @@ TEST_F(LogTest, TestMultipleEntriesInABatch) {
   {
     LogIndexEntry entry;
     ASSERT_OK(log_->log_index_->GetEntry(1, &entry));
-    ASSERT_EQ(1, entry.op_id.term());
+    ASSERT_EQ(1, entry.op_id.term);
     ASSERT_EQ(1, entry.segment_sequence_number);
     int64_t offset = entry.offset_in_segment;
 
     ASSERT_OK(log_->log_index_->GetEntry(2, &entry));
-    ASSERT_EQ(1, entry.op_id.term());
+    ASSERT_EQ(1, entry.op_id.term);
     ASSERT_EQ(1, entry.segment_sequence_number);
     int64_t second_offset = entry.offset_in_segment;
 
@@ -195,13 +195,13 @@ TEST_F(LogTest, TestMultipleEntriesInABatch) {
 
   // Test LookupOpId
   {
-    OpId loaded_op;
-    ASSERT_OK(log_->GetLogReader()->LookupOpId(1, &loaded_op));
-    ASSERT_EQ("1.1", consensus::OpIdToString(loaded_op));
-    ASSERT_OK(log_->GetLogReader()->LookupOpId(2, &loaded_op));
-    ASSERT_EQ("1.2", consensus::OpIdToString(loaded_op));
-    Status s = log_->GetLogReader()->LookupOpId(3, &loaded_op);
-    ASSERT_TRUE(s.IsNotFound()) << "unexpected status: " << s.ToString();
+    auto loaded_op = ASSERT_RESULT(log_->GetLogReader()->LookupOpId(1));
+    ASSERT_EQ(yb::OpId(1, 1), loaded_op);
+    loaded_op = ASSERT_RESULT(log_->GetLogReader()->LookupOpId(2));
+    ASSERT_EQ(yb::OpId(1, 2), loaded_op);
+    auto result = log_->GetLogReader()->LookupOpId(3);
+    ASSERT_TRUE(!result.ok() && result.status().IsNotFound())
+        << "unexpected status: " << result.status();
   }
 
   ASSERT_OK(log_->Close());
@@ -214,7 +214,7 @@ TEST_F(LogTest, TestFsync) {
   options_.durable_wal_write = true;
   BuildLog();
 
-  OpId opid;
+  OpIdPB opid;
   opid.set_term(0);
   opid.set_index(1);
 
@@ -227,7 +227,7 @@ TEST_F(LogTest, TestFsyncInterval) {
   options_.interval_durable_wal_write = MonoDelta::FromMilliseconds(1);
   BuildLog();
 
-  OpId opid;
+  OpIdPB opid;
   opid.set_term(0);
   opid.set_index(1);
 
@@ -246,7 +246,7 @@ TEST_F(LogTest, TestFsyncIntervalPhysical) {
   options_.preallocate_segments = false;
   BuildLog();
 
-  OpId opid;
+  OpIdPB opid;
   opid.set_term(0);
   opid.set_index(1);
 
@@ -287,11 +287,11 @@ TEST_F(LogTest, TestFsyncDataSize) {
   options_.interval_durable_wal_write = MonoDelta::FromMilliseconds(10000);
   BuildLog();
 
-  OpId opid;
+  OpIdPB opid;
   opid.set_term(0);
   opid.set_index(1);
 
-  int size;
+  int size = 0;
   ASSERT_OK(AppendNoOps(&opid, 100 * 1024, &size));
   SleepFor(MonoDelta::FromMilliseconds(1));
   ASSERT_OK(AppendNoOp(&opid));
@@ -306,7 +306,7 @@ TEST_F(LogTest, TestSizeIsMaintained) {
   options_.preallocate_segments = false;
   BuildLog();
 
-  OpId opid = MakeOpId(0, 1);
+  OpIdPB opid = MakeOpId(0, 1);
   ASSERT_OK(AppendNoOp(&opid));
 
   SegmentSequence segments;
@@ -328,7 +328,7 @@ TEST_F(LogTest, TestSizeIsMaintained) {
 TEST_F(LogTest, TestLogNotTrimmed) {
   BuildLog();
 
-  OpId opid;
+  OpIdPB opid;
   opid.set_term(0);
   opid.set_index(1);
 
@@ -369,7 +369,7 @@ void LogTest::DoCorruptionTest(CorruptionType type, CorruptionPosition place,
                                Status expected_status, int expected_entries) {
   const int kNumEntries = 4;
   BuildLog();
-  OpId op_id = MakeOpId(1, 1);
+  OpIdPB op_id = MakeOpId(1, 1);
   ASSERT_OK(AppendNoOps(&op_id, kNumEntries));
 
   // Find the entry that we want to corrupt before closing the log.
@@ -394,7 +394,7 @@ void LogTest::DoCorruptionTest(CorruptionType type, CorruptionPosition place,
   // because it has a cached header.
   std::unique_ptr<LogReader> reader;
   ASSERT_OK(LogReader::Open(fs_manager_->env(),
-                            make_scoped_refptr(new LogIndex(log_->log_dir_)),
+                            make_scoped_refptr(new LogIndex(log_->wal_dir_)),
                             kTestTablet, tablet_wal_path_, fs_manager_->uuid(), nullptr, &reader));
   ASSERT_EQ(1, reader->num_segments());
 
@@ -407,6 +407,7 @@ void LogTest::DoCorruptionTest(CorruptionType type, CorruptionPosition place,
   // Last entry is ignored, but we should still see the previous ones.
   ASSERT_EQ(expected_entries, read_entries.entries.size());
 }
+
 // Tests that the log reader reads up until some truncated entry is found.
 // It should still return OK, since on a crash, it's acceptable to have
 // a partial entry at EOF.
@@ -439,7 +440,7 @@ TEST_F(LogTest, TestSegmentRollover) {
   log_->SetMaxSegmentSizeForTests(990);
   const int kNumEntriesPerBatch = 100;
 
-  OpId op_id = MakeOpId(1, 1);
+  OpIdPB op_id = MakeOpId(1, 1);
   int num_entries = 0;
 
   SegmentSequence segments;
@@ -499,7 +500,7 @@ TEST_F(LogTest, TestWriteAndReadToAndFromInProgressSegment) {
   // Dummy add_entry to help us estimate the size of what
   // gets written to disk.
   LogEntryBatchPB batch;
-  OpId op_id = MakeOpId(1, 1);
+  OpIdPB op_id = MakeOpId(1, 1);
   batch.set_mono_time(1);
   LogEntryPB* log_entry = batch.add_entry();
   log_entry->set_type(REPLICATE);
@@ -569,7 +570,7 @@ TEST_F(LogTest, TestGCWithLogRunning) {
   const int kNumTotalSegments = 4;
   const int kNumOpsPerSegment = 5;
   int num_gced_segments;
-  OpId op_id = MakeOpId(1, 1);
+  OpIdPB op_id = MakeOpId(1, 1);
   int64_t anchored_index = -1;
 
   ASSERT_OK(AppendMultiSegmentSequence(kNumTotalSegments, kNumOpsPerSegment,
@@ -634,9 +635,6 @@ TEST_F(LogTest, TestGCWithLogRunning) {
   }
 }
 
-// This test relies on kEntriesPerIndexChunk being 1000000, and that's no longer
-// the case after D1719 (2fe27d886390038bc734ea28638a1b1435e7d0d4) on Mac.
-#if !defined(__APPLE__)
 // Test that, when we are set to retain a given number of log segments,
 // we also retain any relevant log index chunks, even if those operations
 // are not necessary for recovery.
@@ -652,7 +650,7 @@ TEST_F(LogTest, TestGCOfIndexChunks) {
   // 1000010-<still open> /
   const int kNumTotalSegments = 5;
   const int kNumOpsPerSegment = 5;
-  OpId op_id = MakeOpId(1, 999990);
+  OpIdPB op_id = MakeOpId(1, 999990);
   ASSERT_OK(AppendMultiSegmentSequence(kNumTotalSegments, kNumOpsPerSegment,
                                               &op_id, nullptr));
 
@@ -664,9 +662,8 @@ TEST_F(LogTest, TestGCOfIndexChunks) {
 
   // And we should still be able to read ops in the retained segment, even though
   // the GC index was higher.
-  OpId loaded_op;
-  ASSERT_OK(log_->GetLogReader()->LookupOpId(999995, &loaded_op));
-  ASSERT_EQ("1.999995", consensus::OpIdToString(loaded_op));
+  auto loaded_op = ASSERT_RESULT(log_->GetLogReader()->LookupOpId(999995));
+  ASSERT_EQ(yb::OpId(1, 999995), loaded_op);
 
   // If we drop the retention count down to 1, we can now GC, and the log index
   // chunk should also be GCed.
@@ -674,10 +671,13 @@ TEST_F(LogTest, TestGCOfIndexChunks) {
   ASSERT_OK(log_->GC(1000003, &num_gced_segments));
   ASSERT_EQ(1, num_gced_segments);
 
-  Status s = log_->GetLogReader()->LookupOpId(999995, &loaded_op);
-  ASSERT_TRUE(s.IsNotFound()) << "unexpected status: " << s.ToString();
-}
+  auto result = log_->GetLogReader()->LookupOpId(999995);
+// This test relies on kEntriesPerIndexChunk being 1000000, and that's no longer
+// the case after D1719 (2fe27d886390038bc734ea28638a1b1435e7d0d4) on Mac.
+#if !defined(__APPLE__)
+  ASSERT_TRUE(!result.ok() && result.status().IsNotFound()) << "unexpected status: " << result;
 #endif
+}
 
 // Tests that we can append FLUSH_MARKER messages to the log queue to make sure
 // all messages up to a certain point were fsync()ed without actually
@@ -685,7 +685,7 @@ TEST_F(LogTest, TestGCOfIndexChunks) {
 TEST_F(LogTest, TestWaitUntilAllFlushed) {
   BuildLog();
   // Append 2 replicate pairs asynchronously
-  AppendReplicateBatchToLog(2, APPEND_ASYNC);
+  AppendReplicateBatchToLog(2, AppendSync::kTrue);
 
   ASSERT_OK(log_->WaitUntilAllFlushed());
 
@@ -713,7 +713,7 @@ TEST_F(LogTest, TestLogReopenAndGC) {
   const int kNumTotalSegments = 3;
   const int kNumOpsPerSegment = 5;
   int num_gced_segments;
-  OpId op_id = MakeOpId(1, 1);
+  OpIdPB op_id = MakeOpId(1, 1);
   int64_t anchored_index = -1;
 
   ASSERT_OK(AppendMultiSegmentSequence(kNumTotalSegments, kNumOpsPerSegment,
@@ -825,7 +825,7 @@ TEST_F(LogTest, TestLogReader) {
   ASSERT_OK(AppendNewEmptySegmentToReader(3, 20, &reader));
   ASSERT_OK(AppendNewEmptySegmentToReader(4, 30, &reader));
 
-  OpId op;
+  OpIdPB op;
   op.set_term(0);
   SegmentSequence segments;
 
@@ -877,8 +877,12 @@ TEST_F(LogTest, TestLogReader) {
 TEST_F(LogTest, TestLogReaderReturnsLatestSegmentIfIndexEmpty) {
   BuildLog();
 
-  OpId opid = MakeOpId(1, 1);
-  AppendReplicateBatch(opid, MakeOpId(0, 0), {}, APPEND_SYNC, kTableType);
+  AppendReplicateBatch({
+    .op_id = {1, 1},
+    .committed_op_id = {0, 0},
+    .writes = {},
+    .sync = AppendSync::kTrue,
+  });
 
   SegmentSequence segments;
   ASSERT_OK(log_->GetLogReader()->GetSegmentsSnapshot(&segments));
@@ -890,7 +894,7 @@ TEST_F(LogTest, TestLogReaderReturnsLatestSegmentIfIndexEmpty) {
 }
 
 TEST_F(LogTest, TestOpIdUtils) {
-  OpId id = MakeOpId(1, 2);
+  OpIdPB id = MakeOpId(1, 2);
   ASSERT_EQ("1.2", consensus::OpIdToString(id));
   ASSERT_EQ(1, id.term());
   ASSERT_EQ(2, id.index());
@@ -922,7 +926,7 @@ void LogTest::GenerateTestSequence(Random* rng, int seq_len,
   int64_t committed_index = 0;
   int64_t max_repl_index = 0;
 
-  OpId id = MakeOpId(1, 0);
+  OpIdPB id = MakeOpId(1, 0);
   for (int i = 0; i < seq_len; i++) {
     if (rng->OneIn(5)) {
       // Reset term - it may stay the same, or go up/down
@@ -960,7 +964,7 @@ void LogTest::AppendTestSequence(const vector<TestLogSequenceElem>& seq) {
     switch (e.type) {
       case TestLogSequenceElem::REPLICATE:
       {
-        OpId id(e.id);
+        OpIdPB id(e.id);
         ASSERT_OK(AppendNoOp(&id));
         break;
       }
@@ -1077,7 +1081,7 @@ TEST_F(LogTest, TestGetMaxIndexesToSegmentSizeMap) {
 
   const int kNumTotalSegments = 5;
   const int kNumOpsPerSegment = 5;
-  OpId op_id = MakeOpId(1, 10);
+  OpIdPB op_id = MakeOpId(1, 10);
   // Create 5 segments, starting from log index 10, with 5 ops per segment.
   ASSERT_OK(AppendMultiSegmentSequence(kNumTotalSegments, kNumOpsPerSegment,
                                               &op_id, nullptr));
@@ -1129,7 +1133,7 @@ TEST_F(LogTest, TestReadReplicatesHighIndex) {
   const int kSequenceLength = 10;
 
   BuildLog();
-  OpId op_id;
+  OpIdPB op_id;
   op_id.set_term(first_log_index);
   op_id.set_index(first_log_index);
   ASSERT_OK(AppendNoOps(&op_id, kSequenceLength));

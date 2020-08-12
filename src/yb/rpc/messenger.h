@@ -224,8 +224,8 @@ class Messenger : public ProxyContext {
 
   const Protocol* DefaultProtocol() override { return listen_protocol_; }
 
-  rpc::ThreadPool& CallbackThreadPool() override {
-    return ThreadPool(ServicePriority::kNormal);
+  rpc::ThreadPool& CallbackThreadPool(ServicePriority priority) override {
+    return ThreadPool(priority);
   }
 
   CHECKED_STATUS QueueEventOnAllReactors(
@@ -278,6 +278,10 @@ class Messenger : public ProxyContext {
     return io_thread_pool_.io_service();
   }
 
+  DnsResolver& resolver() override {
+    return *resolver_;
+  }
+
   rpc::ThreadPool& ThreadPool(ServicePriority priority = ServicePriority::kNormal);
 
   RpcMetrics& rpc_metrics() override {
@@ -293,6 +297,7 @@ class Messenger : public ProxyContext {
   // Use specified IP address as base address for outbound connections from messenger.
   void TEST_SetOutboundIpBase(const IpAddress& value) {
     test_outbound_ip_base_ = value;
+    has_outbound_ip_base_.store(true, std::memory_order_release);
   }
 
   bool TEST_ShouldArtificiallyRejectIncomingCallsFrom(const IpAddress &remote);
@@ -370,10 +375,13 @@ class Messenger : public ProxyContext {
   // This could be used for high-priority services such as Consensus.
   AtomicUniquePtr<rpc::ThreadPool> high_priority_thread_pool_;
 
+  std::unique_ptr<DnsResolver> resolver_;
+
   std::unique_ptr<RpcMetrics> rpc_metrics_;
 
   // Use this IP address as base address for outbound connections from messenger.
   IpAddress test_outbound_ip_base_;
+  std::atomic<bool> has_outbound_ip_base_{false};
 
   // Number of outbound connections to create per each destination server address.
   int num_connections_to_server_;

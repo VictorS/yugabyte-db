@@ -1,7 +1,8 @@
 ---
-title: Build a Python App
-linkTitle: Build a Python App
-description: Build a Python App
+title: Build a Python application that uses YCQL
+headerTitle: Build a Python application
+linkTitle: Python
+description: Build a Python application with the Yugabyte Python Driver for YCQL.
 menu:
   latest:
     parent: build-apps
@@ -17,7 +18,7 @@ showAsideToc: true
   <li >
     <a href="/latest/quick-start/build-apps/python/ysql-psycopg2" class="nav-link">
       <i class="icon-postgres" aria-hidden="true"></i>
-      YSQL - psycopg2
+      YSQL - Psycopg2
     </a>
   </li>
   <li >
@@ -34,27 +35,25 @@ showAsideToc: true
   </li>
 </ul>
 
+## Install the Yugabyte Python Driver for YCQL
 
-## Installation
-
-Install the python driver using the following command.
+To install the [Yugabyte Python Driver for YCQL](https://github.com/yugabyte/cassandra-python-driver), run the following command:
 
 ```sh
 $ pip install yb-cassandra-driver
 ```
 
-## Working Example
+## Create a sample Python application
 
 ### Prerequisites
 
 This tutorial assumes that you have:
 
-- installed YugabyteDB, created a universe and are able to interact with it using the CQL shell. If not, please follow these steps in the [quick start guide](../../../quick-start/test-cassandra/).
+- installed YugabyteDB, created a universe, and are able to interact with it using the YCQL shell. If not, follow the steps in [Quick start YCQL](../../../../api/ycql/quick-start/).
 
+### Write the sample Python application
 
-### Writing the python code
-
-Create a file `yb-cql-helloworld.py` and add the following content to it.
+Create a file `yb-cql-helloworld.py` and copy the following content into it.
 
 ```python
 from cassandra.cluster import Cluster
@@ -94,7 +93,7 @@ for row in rows:
 cluster.shutdown()
 ```
 
-### Running the application
+### Run the application
 
 To run the application, type the following:
 

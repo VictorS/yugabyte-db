@@ -28,6 +28,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/time.h>
 #include <sys/types.h>
 #include <sys/uio.h>
@@ -36,6 +37,7 @@
 
 #include <set>
 #include <vector>
+#include "yb/util/status.h"
 
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
@@ -44,6 +46,7 @@
 #include <linux/falloc.h>
 #include <sys/sysinfo.h>
 #endif  // defined(__APPLE__)
+#include <sys/resource.h>
 
 #include <glog/logging.h>
 
@@ -119,8 +122,11 @@ DEFINE_int32(o_direct_block_alignment_bytes, 4096,
              "Alignment (in bytes) for blocks used for O_DIRECT operations.");
 TAG_FLAG(o_direct_block_alignment_bytes, advanced);
 
-DEFINE_test_flag(bool, TEST_simulate_fs_without_fallocate, false,
-    "If true, the system simulates a file system that doesn't support fallocate");
+DEFINE_test_flag(bool, simulate_fs_without_fallocate, false,
+    "If true, the system simulates a file system that doesn't support fallocate.");
+
+DEFINE_test_flag(int64, simulate_free_space_bytes, -1,
+    "If a non-negative value, GetFreeSpaceBytes will return the specified value.");
 
 using base::subtle::Atomic64;
 using base::subtle::Barrier_AtomicIncrement;
@@ -959,6 +965,16 @@ class PosixEnv : public Env {
     return access(fname.c_str(), F_OK) == 0;
   }
 
+  virtual bool DirExists(const std::string& dname) override {
+    TRACE_EVENT1("io", "PosixEnv::DirExists", "path", dname);
+    ThreadRestrictions::AssertIOAllowed();
+    struct stat statbuf;
+    if (stat(dname.c_str(), &statbuf) == 0) {
+      return S_ISDIR(statbuf.st_mode);
+    }
+    return false;
+  }
+
   CHECKED_STATUS GetChildren(const std::string& dir,
                              ExcludeDots exclude_dots,
                              std::vector<std::string>* result) override {
@@ -1252,7 +1268,7 @@ class PosixEnv : public Env {
     // FTS requires a non-const copy of the name. strdup it and free() when
     // we leave scope.
     gscoped_ptr<char, FreeDeleter> name_dup(strdup(root.c_str()));
-    char *(paths[]) = { name_dup.get(), nullptr };
+    char *paths[] = { name_dup.get(), nullptr };
 
     // FTS_NOCHDIR is important here to make this thread-safe.
     gscoped_ptr<FTS, FtsCloser> tree(
@@ -1341,6 +1357,97 @@ class PosixEnv : public Env {
 
   FileFactory* GetFileFactory() {
     return file_factory_.get();
+  }
+
+  Result<uint64_t> GetFreeSpaceBytes(const std::string& path) override {
+    if (PREDICT_FALSE(FLAGS_TEST_simulate_free_space_bytes >= 0)) {
+      return FLAGS_TEST_simulate_free_space_bytes;
+    }
+    struct statvfs stat;
+    auto ret = statvfs(path.c_str(), &stat);
+    if (ret != 0) {
+      if (errno == EACCES) {
+        return STATUS_SUBSTITUTE(NotAuthorized,
+            "Caller doesn't have the required permission on a component of the path $0",
+            path);
+      } else if (errno == EIO) {
+        return STATUS_SUBSTITUTE(IOError,
+            "I/O error occurred while reading from '$0' filesystem",
+            path);
+      } else if (errno == ELOOP) {
+        return STATUS_SUBSTITUTE(InternalError,
+            "Too many symbolic links while translating '$0' path",
+            path);
+      } else if (errno == ENAMETOOLONG) {
+        return STATUS_SUBSTITUTE(NotSupported,
+            "Path '$0' is too long",
+            path);
+      } else if (errno == ENOENT) {
+        return STATUS_SUBSTITUTE(NotFound,
+            "File specified by path '$0' doesn't exist",
+            path);
+      } else if (errno == ENOMEM) {
+        return STATUS(InternalError, "Insufficient memory");
+      } else if (errno == ENOSYS) {
+        return STATUS_SUBSTITUTE(NotSupported,
+            "Filesystem for path '$0' doesn't support statvfs",
+            path);
+      } else if (errno == ENOTDIR) {
+        return STATUS_SUBSTITUTE(InvalidArgument,
+            "A component of the path '$0' is not a directory",
+            path);
+      } else {
+        return STATUS_SUBSTITUTE(InternalError,
+            "Failed to read information about filesystem for path '%s': errno=$0: $1",
+            path,
+            errno,
+            ErrnoToString(errno));
+      }
+    }
+    uint64_t block_size = stat.f_frsize > 0 ? static_cast<uint64_t>(stat.f_frsize) :
+                                              static_cast<uint64_t>(stat.f_bsize);
+    uint64_t available_blocks = static_cast<uint64_t>(stat.f_bavail);
+
+    return available_blocks * block_size;
+  }
+
+  Status GetUlimit(int resource, int64_t* soft_limit, int64_t* hard_limit) override {
+    struct rlimit lim;
+    if (getrlimit(resource, &lim) != 0) {
+      return STATUS_IO_ERROR("getrlimit() failed", errno);
+    }
+    if (soft_limit != NULL) *soft_limit = lim.rlim_cur;
+    if (hard_limit != NULL) *hard_limit = lim.rlim_max;
+    return Status::OK();
+  }
+
+  Status SetUlimit(int resource, int64_t value) override {
+    return SetUlimit(resource, value, strings::Substitute("resource no. $0", resource));
+  }
+
+  Status SetUlimit(int resource, int64_t value, const std::string& resource_name) override {
+    int64_t soft_limit = 0, hard_limit = 0;
+    RETURN_NOT_OK(GetUlimit(resource, &soft_limit, &hard_limit));
+    if (soft_limit == value) {
+      return Status::OK();
+    }
+    if (hard_limit != RLIM_INFINITY && hard_limit < value) {
+      return STATUS_FORMAT(
+        InvalidArgument,
+        "Resource limit value $0 for resource $1 greater than hard limit $2",
+        value, resource, hard_limit);
+    }
+    struct rlimit lim;
+    lim.rlim_cur = value;
+    lim.rlim_max = hard_limit;
+    LOG(INFO)
+        << "Modifying limit for " << resource_name
+        << " from " << soft_limit
+        << " to " << value;
+    if (setrlimit(resource, &lim) != 0) {
+      return STATUS(RuntimeError, "Unable to set rlimit", Errno(errno));
+    }
+    return Status::OK();
   }
 
  private:

@@ -46,6 +46,9 @@ class RefCntBuffer {
 
   explicit RefCntBuffer(const faststring& string);
 
+  explicit RefCntBuffer(const Slice& slice) :
+      RefCntBuffer(slice.data(), slice.size()) {}
+
   RefCntBuffer(const RefCntBuffer& rhs) noexcept;
   RefCntBuffer(RefCntBuffer&& rhs) noexcept;
 
@@ -57,6 +60,8 @@ class RefCntBuffer {
   size_t size() const {
     return size_reference();
   }
+
+  size_t DynamicMemoryUsage() const { return data_ ? GetInternalBufSize(size()) : 0; }
 
   bool empty() const {
     return size() == 0;
@@ -100,12 +105,22 @@ class RefCntBuffer {
     return std::string(begin(), end());
   }
 
-  Slice as_slice() const {
+  Slice AsSlice() const {
     return Slice(data(), size());
+  }
+
+  Slice as_slice() const __attribute__ ((deprecated)) {
+    return Slice(data(), size());
+  }
+
+  void Shrink(size_t new_size) {
+    size_reference() = new_size;
   }
 
  private:
   void DoReset(char* data);
+
+  static size_t GetInternalBufSize(size_t data_size);
 
   // Using ptrdiff_t since it matches register size and is signed.
   typedef std::atomic<std::ptrdiff_t> CounterType;
@@ -133,6 +148,9 @@ class RefCntPrefix {
 
   explicit RefCntPrefix(const std::string& string)
       : bytes_(RefCntBuffer(string)), size_(bytes_.size()) {}
+
+  explicit RefCntPrefix(const Slice& slice)
+      : bytes_(RefCntBuffer(slice)), size_(bytes_.size()) {}
 
   RefCntPrefix(RefCntBuffer bytes) // NOLINT
       : bytes_(std::move(bytes)), size_(bytes_.size()) {}

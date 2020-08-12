@@ -1,7 +1,8 @@
 ---
 title: Statements
-description: Statements
-summary: Statements
+headerTitle: Statements
+description: List of PostgreSQL-compatible SQL statements supported by Yugabyte SQL (YSQL).
+headcontent:
 image: /images/section_icons/api/ysql.png
 menu:
   latest:
@@ -14,7 +15,7 @@ isTocNested: true
 showAsideToc: true
 ---
 
-The following SQL statements are supported by the Yugabyte Structured Query Language (YSQL).
+Yugabyte Structured Query Language (YSQL), the PostgreSQL-compatible SQL dialect for YugabyteDB, supports the following SQL statements.
 
 | Statement | Description |
 |-----------|-------------|
@@ -23,6 +24,7 @@ The following SQL statements are supported by the Yugabyte Structured Query Lang
 | [`ALTER DEFAULT PRIVILEGES`](dcl_alter_default_privileges) | Defines default access privileges |
 | [`ALTER DOMAIN`](ddl_alter_domain) | Alters a domain |
 | [`ALTER GROUP`](dcl_alter_group) | Alter a group |
+| [`ALTER POLICY`](dcl_alter_policy) | Alter a row level security policy |
 | [`ALTER ROLE`](dcl_alter_role) | Alter a role |
 | [`ALTER SEQUENCE`](ddl_alter_sequence) | Alters a sequence definition |
 | [`ALTER TABLE`](ddl_alter_table) | Changes table definition |
@@ -35,11 +37,13 @@ The following SQL statements are supported by the Yugabyte Structured Query Lang
 | [`CREATE CAST`](ddl_create_cast) | Create a new cast |
 | [`CREATE DATABASE`](ddl_create_database) | Create a new database |
 | [`CREATE DOMAIN`](ddl_create_domain) | Create a new domain |
+| [`CREATE EXTENSION`](ddl_create_extension) | Load an extension |
 | [`CREATE FUNCTION`](ddl_create_function) | Create a new function |
 | [`CREATE INDEX`](ddl_create_index) | Create a new index |
 | [`CREATE GROUP`](dcl_create_group) | Create a new group (role) |
 | [`CREATE OPERATOR`](ddl_create_operator) | Create a new operator |
 | [`CREATE OPERATOR CLASS`](ddl_create_operator_class) | Create a new operator class |
+| [`CREATE POLICY`](dcl_create_policy) | Create a new row level security policy |
 | [`CREATE PROCEDURE`](ddl_create_procedure) | Create a new procedure |
 | [`CREATE ROLE`](dcl_create_role) | Create a new role (user or group) |
 | [`CREATE RULE`](ddl_create_rule) | Create a new rule |
@@ -59,11 +63,13 @@ The following SQL statements are supported by the Yugabyte Structured Query Lang
 | [`DROP CAST`](ddl_drop_cast) | Delete a cast |
 | [`DROP DATABASE`](ddl_drop_database) | Delete a database from the system |
 | [`DROP DOMAIN`](ddl_drop_domain) | Delete a domain |
+| [`DROP EXTENSION`](ddl_drop_extension) | Delete an extension |
 | [`DROP FUNCTION`](ddl_drop_function) | Delete a function |
 | [`DROP GROUP`](dcl_drop_group) | Delete a group (role) |
 | [`DROP OPERATOR`](ddl_drop_operator) | Delete an operator |
 | [`DROP OPERATOR CLASS`](ddl_drop_operator_class) | Delete an operator class |
 | [`DROP OWNED`](dcl_drop_owned) | Delete objects owned by role |
+| [`DROP POLICY`](dcl_drop_policy) | Delete a row level security policy |
 | [`DROP PROCEDURE`](ddl_drop_procedure) | Delete a procedure |
 | [`DROP ROLE`](dcl_drop_role) | Delete a role (user or group) |
 | [`DROP RULE`](ddl_drop_rule) | Delete a rule |
@@ -78,15 +84,15 @@ The following SQL statements are supported by the Yugabyte Structured Query Lang
 | [`INSERT`](dml_insert) | Insert rows into a table |
 | [`LOCK`](txn_lock) | Locks a table |
 | [`PREPARE`](perf_prepare) | Prepare a statement |
-| [`REASSIGN OWNED`](reassign_owned) | Reassign owned objects |
+| [`REASSIGN OWNED`](dcl_reassign_owned) | Reassign owned objects |
 | [`RESET`](cmd_reset) | Reset a parameter to factory settings |
 | [`REVOKE`](dcl_revoke) | Remove access privileges |
 | [`ROLLBACK`](txn_rollback) | Rollback a transaction |
 | [`SELECT`](dml_select) | Select rows from a table |
 | [`SET`](cmd_set) | Set a system, session, or transactional parameter |
 | [`SET CONSTRAINTS`](txn_set_constraints) | Set constraints on current transaction |
-| [`SET ROLE`](set_role) | Set a role |
-| [`SET SESSION AUTHORIZATION`](set_session_authorization) | Set session authorization |
+| [`SET ROLE`](dcl_set_role) | Set a role |
+| [`SET SESSION AUTHORIZATION`](dcl_set_session_authorization) | Set session authorization |
 | [`SET TRANSACTION`](txn_set) | Set transaction behaviors |
 | [`SHOW`](cmd_show) | Show value of a system, session, or transactional parameter |
 | [`SHOW TRANSACTION`](txn_show) | Show properties of a transaction |

@@ -41,6 +41,7 @@
 #include "yb/gutil/macros.h"
 #include "yb/gutil/ref_counted.h"
 #include "yb/util/locks.h"
+#include "yb/util/opid.h"
 #include "yb/util/status.h"
 
 namespace yb {
@@ -48,7 +49,7 @@ namespace log {
 
 // An entry in the index.
 struct LogIndexEntry {
-  consensus::OpId op_id;
+  yb::OpId op_id;
 
   // The sequence number of the log segment which contains this entry.
   int64_t segment_sequence_number;
@@ -88,6 +89,9 @@ class LogIndex : public RefCountedThreadSafe<LogIndex> {
   // given index. Note that the implementation is conservative and _may_ choose to retain
   // earlier entries.
   void GC(int64_t min_index_to_retain);
+
+  // Flushes log index to disk.
+  CHECKED_STATUS Flush();
 
  private:
   friend class RefCountedThreadSafe<LogIndex>;

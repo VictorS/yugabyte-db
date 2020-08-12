@@ -45,9 +45,16 @@
 #include "yb/master/master.h"
 #include "yb/master/ts_descriptor.h"
 #include "yb/master/ts_manager.h"
+#include "yb/master/encryption_manager.h"
 #include "yb/server/webserver.h"
+#include "yb/util/debug/long_operation_tracker.h"
 #include "yb/util/flag_tags.h"
 #include "yb/util/random_util.h"
+#include "yb/util/shared_lock.h"
+
+DEFINE_int64(tablet_split_size_threshold_bytes, 0,
+             "Threshold on tablet size after which tablet should be split. Automated splitting is "
+             "disabled if this value is set to 0");
 
 DEFINE_int32(master_inject_latency_on_tablet_lookups_ms, 0,
              "Number of milliseconds that the master will sleep before responding to "
@@ -55,9 +62,8 @@ DEFINE_int32(master_inject_latency_on_tablet_lookups_ms, 0,
 TAG_FLAG(master_inject_latency_on_tablet_lookups_ms, unsafe);
 TAG_FLAG(master_inject_latency_on_tablet_lookups_ms, hidden);
 
-DEFINE_test_flag(int32, master_inject_latency_on_transactional_tablet_lookups_ms, 0,
-                 "Number of milliseconds that the master will sleep before responding to "
-                 "requests for transactional tablet locations.");
+DEFINE_test_flag(bool, master_fail_transactional_tablet_lookups, false,
+                 "Whether to fail all lookup requests to transactional table.");
 
 DEFINE_double(master_slow_get_registration_probability, 0,
               "Probability of injecting delay in GetMasterRegistration.");
@@ -70,6 +76,7 @@ namespace master {
 using std::string;
 using std::vector;
 using std::shared_ptr;
+using std::ostringstream;
 using consensus::RaftPeerPB;
 using rpc::RpcContext;
 
@@ -90,6 +97,8 @@ MasterServiceImpl::MasterServiceImpl(Master* server)
 void MasterServiceImpl::TSHeartbeat(const TSHeartbeatRequestPB* req,
                                     TSHeartbeatResponsePB* resp,
                                     RpcContext rpc) {
+  LongOperationTracker long_operation_tracker("TSHeartbeat", 1s);
+
   // If CatalogManager is not initialized don't even know whether or not we will
   // be a leader (so we can't tell whether or not we can accept tablet reports).
   CatalogManager::ScopedLeaderSharedLock l(server_->catalog_manager());
@@ -186,6 +195,21 @@ void MasterServiceImpl::TSHeartbeat(const TSHeartbeatRequestPB* req,
     }
   }
 
+  if (!req->has_tablet_report() || req->tablet_report().is_incremental()) {
+    // TODO(tsplit): for now we only do splitting in case there is no full tablet report to
+    // minimize probability of TSHeartbeat RPC timeout and retry.
+    // This will be improved to handle split retries appropriately and then we won't need that
+    // check.
+    for (const auto& tablet : req->tablets_for_split()) {
+      LOG(INFO) << "Got tablet to split: " << AsString(tablet);
+      const auto split_status = server_->catalog_manager()->SplitTablet(
+          tablet.tablet_id(), tablet.split_encoded_key(), tablet.split_partition_key());
+      if (!split_status.ok()) {
+        LOG(WARNING) << split_status;
+      }
+    }
+  }
+
   if (!ts_desc->has_tablet_report()) {
     resp->set_needs_full_tablet_report(true);
   }
@@ -201,6 +225,10 @@ void MasterServiceImpl::TSHeartbeat(const TSHeartbeatRequestPB* req,
   uint64_t version = server_->catalog_manager()->GetYsqlCatalogVersion();
   resp->set_ysql_catalog_version(version);
 
+  if (FLAGS_tablet_split_size_threshold_bytes > 0) {
+    resp->set_tablet_split_size_threshold_bytes(FLAGS_tablet_split_size_threshold_bytes);
+  }
+
   rpc.RespondSuccess();
 }
 
@@ -215,7 +243,7 @@ void MasterServiceImpl::GetTabletLocations(const GetTabletLocationsRequestPB* re
   if (PREDICT_FALSE(FLAGS_master_inject_latency_on_tablet_lookups_ms > 0)) {
     SleepFor(MonoDelta::FromMilliseconds(FLAGS_master_inject_latency_on_tablet_lookups_ms));
   }
-  if (PREDICT_FALSE(FLAGS_master_inject_latency_on_transactional_tablet_lookups_ms > 0)) {
+  if (PREDICT_FALSE(FLAGS_TEST_master_fail_transactional_tablet_lookups)) {
     std::vector<scoped_refptr<TableInfo>> tables;
     server_->catalog_manager()->GetAllTables(&tables);
     const auto& tablet_id = req->tablet_ids(0);
@@ -224,10 +252,14 @@ void MasterServiceImpl::GetTabletLocations(const GetTabletLocationsRequestPB* re
       table->GetAllTablets(&tablets);
       for (const auto& tablet : tablets) {
         if (tablet->tablet_id() == tablet_id) {
-          auto lock = table->LockForRead();
-          if (table->metadata().state().table_type() == TableType::TRANSACTION_STATUS_TABLE_TYPE) {
-            SleepFor(MonoDelta::FromMilliseconds(
-                FLAGS_master_inject_latency_on_transactional_tablet_lookups_ms));
+          TableType table_type;
+          {
+            auto lock = table->LockForRead();
+            table_type = table->metadata().state().table_type();
+          }
+          if (table_type == TableType::TRANSACTION_STATUS_TABLE_TYPE) {
+            rpc.RespondFailure(STATUS(InvalidCommand, "TEST: Artificial failure"));
+            return;
           }
           break;
         }
@@ -327,16 +359,40 @@ void MasterServiceImpl::CreateNamespace(const CreateNamespaceRequestPB* req,
   HandleIn(req, resp, &rpc, &CatalogManager::CreateNamespace);
 }
 
+void MasterServiceImpl::IsCreateNamespaceDone(const IsCreateNamespaceDoneRequestPB* req,
+                                              IsCreateNamespaceDoneResponsePB* resp,
+                                              rpc::RpcContext rpc) {
+  HandleIn(req, resp, &rpc, &CatalogManager::IsCreateNamespaceDone);
+}
+
 void MasterServiceImpl::DeleteNamespace(const DeleteNamespaceRequestPB* req,
                                         DeleteNamespaceResponsePB* resp,
                                         RpcContext rpc) {
   HandleIn(req, resp, &rpc, &CatalogManager::DeleteNamespace);
 }
 
+void MasterServiceImpl::IsDeleteNamespaceDone(const IsDeleteNamespaceDoneRequestPB* req,
+                                              IsDeleteNamespaceDoneResponsePB* resp,
+                                              RpcContext rpc) {
+  HandleIn(req, resp, &rpc, &CatalogManager::IsDeleteNamespaceDone);
+}
+
+void MasterServiceImpl::AlterNamespace(const AlterNamespaceRequestPB* req,
+                                       AlterNamespaceResponsePB* resp,
+                                       RpcContext rpc) {
+  HandleIn(req, resp, &rpc, &CatalogManager::AlterNamespace);
+}
+
 void MasterServiceImpl::ListNamespaces(const ListNamespacesRequestPB* req,
                                        ListNamespacesResponsePB* resp,
                                        RpcContext rpc) {
   HandleIn(req, resp, &rpc, &CatalogManager::ListNamespaces);
+}
+
+void MasterServiceImpl::GetNamespaceInfo(const GetNamespaceInfoRequestPB* req,
+                                         GetNamespaceInfoResponsePB* resp,
+                                         RpcContext rpc) {
+  HandleIn(req, resp, &rpc, &CatalogManager::GetNamespaceInfo);
 }
 
 void MasterServiceImpl::ReservePgsqlOids(const ReservePgsqlOidsRequestPB* req,
@@ -349,6 +405,28 @@ void MasterServiceImpl::GetYsqlCatalogConfig(const GetYsqlCatalogConfigRequestPB
                                              GetYsqlCatalogConfigResponsePB* resp,
                                              rpc::RpcContext rpc) {
   HandleIn(req, resp, &rpc, &CatalogManager::GetYsqlCatalogConfig);
+}
+
+// ------------------------------------------------------------------------------------------------
+// Tablegroup
+// ------------------------------------------------------------------------------------------------
+
+void MasterServiceImpl::CreateTablegroup(const CreateTablegroupRequestPB* req,
+                                         CreateTablegroupResponsePB* resp,
+                                         rpc::RpcContext rpc) {
+  HandleIn(req, resp, &rpc, &CatalogManager::CreateTablegroup);
+}
+
+void MasterServiceImpl::DeleteTablegroup(const DeleteTablegroupRequestPB* req,
+                                         DeleteTablegroupResponsePB* resp,
+                                         rpc::RpcContext rpc) {
+  HandleIn(req, resp, &rpc, &CatalogManager::DeleteTablegroup);
+}
+
+void MasterServiceImpl::ListTablegroups(const ListTablegroupsRequestPB* req,
+                                        ListTablegroupsResponsePB* resp,
+                                        rpc::RpcContext rpc) {
+  HandleIn(req, resp, &rpc, &CatalogManager::ListTablegroups);
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -488,6 +566,8 @@ void MasterServiceImpl::ListTabletServers(const ListTabletServersRequestPB* req,
     *entry->mutable_instance_id() = std::move(*ts_info.mutable_tserver_instance());
     *entry->mutable_registration() = std::move(*ts_info.mutable_registration());
     entry->set_millis_since_heartbeat(desc->TimeSinceHeartbeat().ToMilliseconds());
+    entry->set_alive(TSManager::IsTSLive(desc));
+    desc->GetMetrics(entry->mutable_metrics());
   }
   rpc.RespondSuccess();
 }
@@ -551,7 +631,17 @@ void MasterServiceImpl::DumpState(
     return;
   }
 
-  server_->catalog_manager()->DumpState(&LOG(INFO), req->on_disk());
+  const string role = (req->has_peers_also() && req->peers_also() ? "Leader" : "Follower");
+  const string title = role + " Master " + server_->instance_pb().permanent_uuid();
+
+  if (req->return_dump_as_string()) {
+    ostringstream ss;
+    server_->catalog_manager()->DumpState(&ss, req->on_disk());
+    resp->set_dump(title + ":\n" + ss.str());
+  } else {
+    LOG(INFO) << title;
+    server_->catalog_manager()->DumpState(&LOG(INFO), req->on_disk());
+  }
 
   if (req->has_peers_also() && req->peers_also()) {
     std::vector<RaftPeerPB> masters_raft;
@@ -580,7 +670,7 @@ void MasterServiceImpl::DumpState(
 
     masters_raft.erase(it);
 
-    s = server_->catalog_manager()->PeerStateDump(masters_raft, req->on_disk());
+    s = server_->catalog_manager()->PeerStateDump(masters_raft, req, resp);
     CheckRespErrorOrSetUnknown(s, resp);
   }
 
@@ -603,16 +693,19 @@ void MasterServiceImpl::RemovedMasterUpdate(const RemovedMasterUpdateRequestPB* 
 void MasterServiceImpl::ChangeLoadBalancerState(
     const ChangeLoadBalancerStateRequestPB* req, ChangeLoadBalancerStateResponsePB* resp,
     RpcContext rpc) {
-  CatalogManager::ScopedLeaderSharedLock l(server_->catalog_manager());
-  if (!l.CheckIsInitializedAndIsLeaderOrRespond(resp, &rpc)) {
-    return;
-  }
-
+  // This should work on both followers and leaders, in order to cover leader failover!
   if (req->has_is_enabled()) {
     LOG(INFO) << "Changing balancer state to " << req->is_enabled();
     server_->catalog_manager()->SetLoadBalancerEnabled(req->is_enabled());
   }
 
+  rpc.RespondSuccess();
+}
+
+void MasterServiceImpl::GetLoadBalancerState(
+    const GetLoadBalancerStateRequestPB* req, GetLoadBalancerStateResponsePB* resp,
+    RpcContext rpc) {
+  resp->set_is_enabled(server_->catalog_manager()->IsLoadBalancerEnabled());
   rpc.RespondSuccess();
 }
 
@@ -676,6 +769,13 @@ void MasterServiceImpl::AreLeadersOnPreferredOnly(
   HandleIn(req, resp, &rpc, &CatalogManager::AreLeadersOnPreferredOnly);
 }
 
+void MasterServiceImpl::AreTransactionLeadersSpread(
+    const AreTransactionLeadersSpreadRequestPB* req,
+    AreTransactionLeadersSpreadResponsePB* resp,
+    RpcContext rpc) {
+  HandleIn(req, resp, &rpc, &CatalogManager::AreTransactionLeadersSpread);
+}
+
 void MasterServiceImpl::FlushTables(const FlushTablesRequestPB* req,
                                     FlushTablesResponsePB* resp,
                                     RpcContext rpc) {
@@ -706,6 +806,24 @@ void MasterServiceImpl::IsEncryptionEnabled(const IsEncryptionEnabledRequestPB* 
   HandleIn(req, resp, &rpc, &enterprise::CatalogManager::IsEncryptionEnabled);
 }
 
+void MasterServiceImpl::GetUniverseKeyRegistry(const GetUniverseKeyRegistryRequestPB* req,
+                                               GetUniverseKeyRegistryResponsePB* resp,
+                                               rpc::RpcContext rpc) {
+  HandleOnAllMasters(req, resp, &rpc, &EncryptionManager::GetUniverseKeyRegistry);
+}
+
+void MasterServiceImpl::AddUniverseKeys(const AddUniverseKeysRequestPB* req,
+                                        AddUniverseKeysResponsePB* resp,
+                                        rpc::RpcContext rpc) {
+  HandleOnAllMasters(req, resp, &rpc, &EncryptionManager::AddUniverseKeys);
+}
+
+void MasterServiceImpl::HasUniverseKeyInMemory(const HasUniverseKeyInMemoryRequestPB* req,
+                                               HasUniverseKeyInMemoryResponsePB* resp,
+                                               rpc::RpcContext rpc) {
+  HandleOnAllMasters(req, resp, &rpc, &EncryptionManager::HasUniverseKeyInMemory);
+}
+
 void MasterServiceImpl::SetupUniverseReplication(const SetupUniverseReplicationRequestPB* req,
                                                  SetupUniverseReplicationResponsePB* resp,
                                                  rpc::RpcContext rpc) {
@@ -718,10 +836,28 @@ void MasterServiceImpl::DeleteUniverseReplication(const DeleteUniverseReplicatio
   HandleIn(req, resp, &rpc, &enterprise::CatalogManager::DeleteUniverseReplication);
 }
 
+void MasterServiceImpl::AlterUniverseReplication(const AlterUniverseReplicationRequestPB* req,
+                                                  AlterUniverseReplicationResponsePB* resp,
+                                                  rpc::RpcContext rpc) {
+  HandleIn(req, resp, &rpc, &enterprise::CatalogManager::AlterUniverseReplication);
+}
+
+void MasterServiceImpl::SetUniverseReplicationEnabled(
+                          const SetUniverseReplicationEnabledRequestPB* req,
+                          SetUniverseReplicationEnabledResponsePB* resp,
+                          rpc::RpcContext rpc) {
+  HandleIn(req, resp, &rpc, &enterprise::CatalogManager::SetUniverseReplicationEnabled);
+}
+
 void MasterServiceImpl::GetUniverseReplication(const GetUniverseReplicationRequestPB* req,
                                                GetUniverseReplicationResponsePB* resp,
                                                rpc::RpcContext rpc) {
   HandleIn(req, resp, &rpc, &enterprise::CatalogManager::GetUniverseReplication);
+}
+
+void MasterServiceImpl::SplitTablet(
+    const SplitTabletRequestPB* req, SplitTabletResponsePB* resp, rpc::RpcContext rpc) {
+  HandleIn(req, resp, &rpc, &CatalogManager::SplitTablet);
 }
 
 } // namespace master

@@ -85,8 +85,10 @@ TEST_F(SysCatalogTest, TestPrepareDefaultClusterConfig) {
   FLAGS_cluster_uuid = "invalid_uuid";
 
   CatalogManager catalog_manager(nullptr);
-
-  ASSERT_NOK(catalog_manager.PrepareDefaultClusterConfig(0));
+  {
+    std::lock_guard<CatalogManager::LockType> l(catalog_manager.lock_);
+    ASSERT_NOK(catalog_manager.PrepareDefaultClusterConfig(0));
+  }
 
   auto dir = GetTestPath("Master") + "valid_cluster_uuid_test";
   ASSERT_OK(Env::Default()->CreateDir(dir));
@@ -160,7 +162,7 @@ TEST_F(SysCatalogTest, TestSysCatalogTablesOperations) {
   ASSERT_OK(sys_catalog->Visit(loader.get()));
 
   ASSERT_EQ(1 + kNumSystemTables, loader->tables.size());
-  ASSERT_TRUE(MetadatasEqual(table.get(), loader->tables[table_id]));
+  ASSERT_METADATA_EQ(table.get(), loader->tables[table_id]);
 
   // Update the table
   {
@@ -174,7 +176,7 @@ TEST_F(SysCatalogTest, TestSysCatalogTablesOperations) {
   loader->Reset();
   ASSERT_OK(sys_catalog->Visit(loader.get()));
   ASSERT_EQ(1 + kNumSystemTables, loader->tables.size());
-  ASSERT_TRUE(MetadatasEqual(table.get(), loader->tables[table_id]));
+  ASSERT_METADATA_EQ(table.get(), loader->tables[table_id]);
 
   // Delete the table
   loader->Reset();
@@ -290,8 +292,8 @@ TEST_F(SysCatalogTest, TestSysCatalogTabletsOperations) {
 
     ASSERT_OK(sys_catalog->Visit(loader.get()));
     ASSERT_EQ(2 + kNumSystemTables, loader->tablets.size());
-    ASSERT_TRUE(MetadatasEqual(tablet1.get(), loader->tablets[tablet1->id()]));
-    ASSERT_TRUE(MetadatasEqual(tablet2.get(), loader->tablets[tablet2->id()]));
+    ASSERT_METADATA_EQ(tablet1.get(), loader->tablets[tablet1->id()]);
+    ASSERT_METADATA_EQ(tablet2.get(), loader->tablets[tablet2->id()]);
   }
 
   // Update tablet1
@@ -307,8 +309,8 @@ TEST_F(SysCatalogTest, TestSysCatalogTabletsOperations) {
     loader->Reset();
     ASSERT_OK(sys_catalog->Visit(loader.get()));
     ASSERT_EQ(2 + kNumSystemTables, loader->tablets.size());
-    ASSERT_TRUE(MetadatasEqual(tablet1.get(), loader->tablets[tablet1->id()]));
-    ASSERT_TRUE(MetadatasEqual(tablet2.get(), loader->tablets[tablet2->id()]));
+    ASSERT_METADATA_EQ(tablet1.get(), loader->tablets[tablet1->id()]);
+    ASSERT_METADATA_EQ(tablet2.get(), loader->tablets[tablet2->id()]);
   }
 
   // Add tablet3 and Update tablet1 and tablet2
@@ -335,9 +337,9 @@ TEST_F(SysCatalogTest, TestSysCatalogTabletsOperations) {
 
     ASSERT_OK(sys_catalog->Visit(loader.get()));
     ASSERT_EQ(3 + kNumSystemTables, loader->tablets.size());
-    ASSERT_TRUE(MetadatasEqual(tablet1.get(), loader->tablets[tablet1->id()]));
-    ASSERT_TRUE(MetadatasEqual(tablet2.get(), loader->tablets[tablet2->id()]));
-    ASSERT_TRUE(MetadatasEqual(tablet3.get(), loader->tablets[tablet3->id()]));
+    ASSERT_METADATA_EQ(tablet1.get(), loader->tablets[tablet1->id()]);
+    ASSERT_METADATA_EQ(tablet2.get(), loader->tablets[tablet2->id()]);
+    ASSERT_METADATA_EQ(tablet3.get(), loader->tablets[tablet3->id()]);
   }
 
   // Delete tablet1 and tablet3 tablets
@@ -350,7 +352,7 @@ TEST_F(SysCatalogTest, TestSysCatalogTabletsOperations) {
     ASSERT_OK(sys_catalog->DeleteItems(tablets, kLeaderTerm));
     ASSERT_OK(sys_catalog->Visit(loader.get()));
     ASSERT_EQ(1 + kNumSystemTables, loader->tablets.size());
-    ASSERT_TRUE(MetadatasEqual(tablet2.get(), loader->tablets[tablet2->id()]));
+    ASSERT_METADATA_EQ(tablet2.get(), loader->tablets[tablet2->id()]);
   }
 }
 
@@ -453,7 +455,7 @@ TEST_F(SysCatalogTest, TestSysCatalogPlacementOperations) {
   loader->Reset();
   ASSERT_OK(sys_catalog->Visit(loader.get()));
   ASSERT_TRUE(loader->config_info);
-  ASSERT_TRUE(MetadatasEqual(config_info.get(), loader->config_info));
+  ASSERT_METADATA_EQ(config_info.get(), loader->config_info);
 
   {
     auto l = config_info->LockForWrite();
@@ -474,7 +476,7 @@ TEST_F(SysCatalogTest, TestSysCatalogPlacementOperations) {
   loader->Reset();
   ASSERT_OK(sys_catalog->Visit(loader.get()));
   ASSERT_TRUE(loader->config_info);
-  ASSERT_TRUE(MetadatasEqual(config_info.get(), loader->config_info));
+  ASSERT_METADATA_EQ(config_info.get(), loader->config_info);
 
   // Test data through the CatalogManager API.
 
@@ -588,7 +590,7 @@ TEST_F(SysCatalogTest, TestSysCatalogNamespacesOperations) {
   loader->Reset();
   ASSERT_OK(sys_catalog->Visit(loader.get()));
   ASSERT_EQ(1 + kNumSystemNamespaces, loader->namespaces.size());
-  ASSERT_TRUE(MetadatasEqual(ns.get(), loader->namespaces[loader->namespaces.size() - 1]));
+  ASSERT_METADATA_EQ(ns.get(), loader->namespaces[loader->namespaces.size() - 1]);
 
   // 3. CHECK UPDATE_NAMESPACE
   // Update the namespace
@@ -603,7 +605,7 @@ TEST_F(SysCatalogTest, TestSysCatalogNamespacesOperations) {
   loader->Reset();
   ASSERT_OK(sys_catalog->Visit(loader.get()));
   ASSERT_EQ(1 + kNumSystemNamespaces, loader->namespaces.size());
-  ASSERT_TRUE(MetadatasEqual(ns.get(), loader->namespaces[loader->namespaces.size() - 1]));
+  ASSERT_METADATA_EQ(ns.get(), loader->namespaces[loader->namespaces.size() - 1]);
 
   // 4. CHECK DELETE_NAMESPACE
   // Delete the namespace
@@ -721,7 +723,7 @@ TEST_F(SysCatalogTest, TestSysCatalogRedisConfigOperations) {
   ASSERT_OK(sys_catalog->Visit(loader.get()));
   // The default config is empty
   ASSERT_EQ(1, loader->config_entries.size());
-  ASSERT_TRUE(MetadatasEqual(rci.get(), loader->config_entries[0]));
+  ASSERT_METADATA_EQ(rci.get(), loader->config_entries[0]);
 
   // Update the same config.
   SysRedisConfigEntryPB* metadata;
@@ -739,7 +741,7 @@ TEST_F(SysCatalogTest, TestSysCatalogRedisConfigOperations) {
   ASSERT_OK(sys_catalog->Visit(loader.get()));
   //  The default config is empty.
   ASSERT_EQ(1, loader->config_entries.size());
-  ASSERT_TRUE(MetadatasEqual(rci.get(), loader->config_entries[0]));
+  ASSERT_METADATA_EQ(rci.get(), loader->config_entries[0]);
 
   // Add another key
   {
@@ -764,7 +766,7 @@ TEST_F(SysCatalogTest, TestSysCatalogRedisConfigOperations) {
     ASSERT_OK(sys_catalog->Visit(loader.get()));
     // The default config is empty
     ASSERT_EQ(2, loader->config_entries.size());
-    ASSERT_TRUE(MetadatasEqual(rci2.get(), loader->config_entries[1]));
+    ASSERT_METADATA_EQ(rci2.get(), loader->config_entries[1]);
 
     // 2. CHECK DELETE RedisConfig
     ASSERT_OK(sys_catalog->DeleteItem(rci2.get(), kLeaderTerm));
@@ -817,7 +819,8 @@ TEST_F(SysCatalogTest, TestSysCatalogSysConfigOperations) {
 
   // 1. Verify that when master initializes:
   //   a. "security-config" entry is set up with roles_version = 0.
-  //   b. "ysql-catalog-configuration" entry is set up with version = 0;
+  //   b. "ysql-catalog-configuration" entry is set up with version = 0 and the transactional YSQL
+  //      sys catalog flag is set to true.
   scoped_refptr<SysConfigInfo> security_config = new SysConfigInfo(kSecurityConfigType);
   {
     auto l = security_config->LockForWrite();
@@ -827,14 +830,16 @@ TEST_F(SysCatalogTest, TestSysCatalogSysConfigOperations) {
   scoped_refptr<SysConfigInfo> ysql_catalog_config = new SysConfigInfo(kYsqlCatalogConfigType);
   {
     auto l = ysql_catalog_config->LockForWrite();
-    l->mutable_data()->pb.mutable_ysql_catalog_config()->set_version(0);
+    auto& ysql_catalog_config_pb = *l->mutable_data()->pb.mutable_ysql_catalog_config();
+    ysql_catalog_config_pb.set_version(0);
+    ysql_catalog_config_pb.set_transactional_sys_catalog_enabled(true);
     l->Commit();
   }
   unique_ptr<TestSysConfigLoader> loader(new TestSysConfigLoader());
   ASSERT_OK(sys_catalog->Visit(loader.get()));
   ASSERT_EQ(2, loader->sys_configs.size());
-  ASSERT_TRUE(MetadatasEqual(security_config.get(), loader->sys_configs[0]));
-  ASSERT_TRUE(MetadatasEqual(ysql_catalog_config.get(), loader->sys_configs[1]));
+  ASSERT_METADATA_EQ(security_config.get(), loader->sys_configs[0]);
+  ASSERT_METADATA_EQ(ysql_catalog_config.get(), loader->sys_configs[1]);
 
   // 2. Add a new SysConfigEntryPB and verify it shows up.
   scoped_refptr<SysConfigInfo> test_config = new SysConfigInfo("test-security-configuration");
@@ -849,17 +854,17 @@ TEST_F(SysCatalogTest, TestSysCatalogSysConfigOperations) {
   loader->Reset();
   ASSERT_OK(sys_catalog->Visit(loader.get()));
   ASSERT_EQ(3, loader->sys_configs.size());
-  ASSERT_TRUE(MetadatasEqual(security_config.get(), loader->sys_configs[0]));
-  ASSERT_TRUE(MetadatasEqual(test_config.get(), loader->sys_configs[1]));
-  ASSERT_TRUE(MetadatasEqual(ysql_catalog_config.get(), loader->sys_configs[2]));
+  ASSERT_METADATA_EQ(security_config.get(), loader->sys_configs[0]);
+  ASSERT_METADATA_EQ(test_config.get(), loader->sys_configs[1]);
+  ASSERT_METADATA_EQ(ysql_catalog_config.get(), loader->sys_configs[2]);
 
   // 2. Remove the SysConfigEntry and verify that it got removed.
   ASSERT_OK(sys_catalog->DeleteItem(test_config.get(), kLeaderTerm));
   loader->Reset();
   ASSERT_OK(sys_catalog->Visit(loader.get()));
   ASSERT_EQ(2, loader->sys_configs.size());
-  ASSERT_TRUE(MetadatasEqual(security_config.get(), loader->sys_configs[0]));
-  ASSERT_TRUE(MetadatasEqual(ysql_catalog_config.get(), loader->sys_configs[1]));
+  ASSERT_METADATA_EQ(security_config.get(), loader->sys_configs[0]);
+  ASSERT_METADATA_EQ(ysql_catalog_config.get(), loader->sys_configs[1]);
 }
 
 class TestRoleLoader : public Visitor<PersistentRoleInfo> {
@@ -919,7 +924,7 @@ TEST_F(SysCatalogTest, TestSysCatalogRoleOperations) {
   ASSERT_OK(sys_catalog->Visit(loader.get()));
   // The first role is the default cassandra role
   ASSERT_EQ(2, loader->roles.size());
-  ASSERT_TRUE(MetadatasEqual(rl.get(), loader->roles[1]));
+  ASSERT_METADATA_EQ(rl.get(), loader->roles[1]);
 
   // Adding permissions
   SysRoleEntryPB* metadata;
@@ -951,7 +956,7 @@ TEST_F(SysCatalogTest, TestSysCatalogRoleOperations) {
   ASSERT_OK(sys_catalog->Visit(loader.get()));
   // The first role is the default cassandra role
   ASSERT_EQ(2, loader->roles.size());
-  ASSERT_TRUE(MetadatasEqual(rl.get(), loader->roles[1]));
+  ASSERT_METADATA_EQ(rl.get(), loader->roles[1]);
 
   // 2. CHECK DELETE Role
   ASSERT_OK(sys_catalog->DeleteItem(rl.get(), kLeaderTerm));
@@ -985,7 +990,7 @@ TEST_F(SysCatalogTest, TestSysCatalogUDTypeOperations) {
   loader->Reset();
   ASSERT_OK(sys_catalog->Visit(loader.get()));
   ASSERT_EQ(1, loader->udtypes.size());
-  ASSERT_TRUE(MetadatasEqual(tp.get(), loader->udtypes[0]));
+  ASSERT_METADATA_EQ(tp.get(), loader->udtypes[0]);
 
   // 2. CHECK DELETE_UDTYPE
   ASSERT_OK(sys_catalog->DeleteItem(tp.get(), kLeaderTerm));
@@ -1029,13 +1034,13 @@ TEST_F(SysCatalogTest, TestCatalogManagerTasksTracker) {
   ASSERT_OK(sys_catalog->Visit(loader.get()));
 
   ASSERT_EQ(1 + kNumSystemTables, loader->tables.size());
-  ASSERT_TRUE(MetadatasEqual(table.get(), loader->tables[table_id]));
+  ASSERT_METADATA_EQ(table.get(), loader->tables[table_id]);
 
   // Add tasks to the table (more than can fit in the cbuf).
   for (int task_id = 0; task_id < FLAGS_tasks_tracker_num_tasks + 10; ++task_id) {
     scoped_refptr<TabletInfo> tablet(new TabletInfo(table, kSysCatalogTableId));
-    auto task = std::make_shared<AsyncTruncate>(master_, master_->catalog_manager()->WorkerPool(),
-                                                tablet);
+    auto task = std::make_shared<AsyncTruncate>(
+        master_, master_->catalog_manager()->AsyncTaskPool(), tablet);
     table->AddTask(task);
   }
 

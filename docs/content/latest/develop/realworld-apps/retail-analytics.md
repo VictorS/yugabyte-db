@@ -1,7 +1,8 @@
 ---
-title: Retail Analytics
+title: Retail analytics example application
+headerTitle: Retail analytics sample application
 linkTitle: Retail Analytics
-description: Retail Analytics
+description: Run this retail analytics sample application on YugabyteDB and explore YSQL.
 aliases:
   - /develop/realworld-apps/retail-analytics/
 menu:
@@ -13,7 +14,7 @@ isTocNested: true
 showAsideToc: true
 ---
 
-## 1. Start local cluster with YSQL API enabled
+## 1. Start local cluster
 
 Follow [Quick Start](../../../quick-start/) instructions to run a local YugabyteDB cluster. Test the YSQL API as [documented](../../../quick-start/explore-ysql/) so that you can confirm that you have the YSQL service running on `localhost:5433`. 
 
@@ -65,7 +66,7 @@ yugabyte=# CREATE DATABASE yb_demo;
 ```
 
 ```postgresql
-yugabyte=# GRANT ALL ON DATABASE yb_demo to postgres;
+yugabyte=# GRANT ALL ON DATABASE yb_demo to yugabyte;
 ```
 
 ```postgresql
@@ -183,7 +184,7 @@ yb_demo=# CREATE VIEW channel AS
              ORDER BY total_sales DESC);
 ```
 
-Now that the view is created, we can see it in our list of relations.
+Now that the view is created, you can see it in our list of relations.
 
 ```postgresql
 yb_demo=# \d

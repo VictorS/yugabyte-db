@@ -3,6 +3,7 @@ title: Overview
 linkTitle: Overview
 description: Overview
 type: page
+block_indexing: true
 menu:
   v1.0:
     identifier: overview
@@ -34,7 +35,7 @@ YugabyteDB is a single operational database that brings together 3 must-have nee
 
 ### 2. High Performance
 
-- Low latency for geo-distributed applications with multiple [read consistency levels](../../architecture/concepts/replication/#tunable-read-consistency) and [read-only replicas](../../architecture/concepts/replication/#read-only-replicas).
+- Low latency for geo-distributed applications with multiple [read consistency levels](../../architecture/concepts/replication/#tunable-read-consistency) and [read replicas](../../architecture/concepts/replication/#read-only-replicas).
 
 - High throughput for ingesting and serving ever-growing datasets.
 
